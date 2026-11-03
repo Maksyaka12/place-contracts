@@ -19,7 +19,7 @@ interface ITaxDividendClaimFactory {
 }
 
 /// @notice Atomically withdraw the calling holder's earned dividends from this suite's registered launches.
-/// @dev The immutable Hook's existing protected, set-once wiring is the only factory binding.
+/// @dev The helper reads its factory from the hook's set-once wiring, so it needs no configuration of its own.
 contract TaxDividendClaimHelper is ITaxDividendClaimHelper, ReentrancyGuard {
     address public immutable override hook;
     uint256 public constant MAX_BATCH_SIZE = TaxSuiteConstants.MAX_BATCH_SIZE;

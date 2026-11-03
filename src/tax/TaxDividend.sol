@@ -18,9 +18,11 @@ interface ITaxDividendWrappedNative {
     function withdraw(uint256 amount) external;
 }
 
-/// @notice Per-launch rewards using the reviewed Flap pending-balance and reward-debt accounting.
-/// @dev The fixed owner is the suite factory. Emergency withdrawal deliberately may remove unpaid backing.
-///      Upstream reference and adaptation details are in contracts/reference/flap/.
+/// @title TaxDividend
+/// @notice Per-launch dividend tracker, deployed as a clone. Holders earn the launch's dividend fees in
+///         proportion to their balance through a reward-per-share accumulator with per-holder reward debt.
+/// @dev The owner is always the suite factory. Emergency withdrawal may intentionally remove unpaid reward
+///      backing.
 contract TaxDividend is Initializable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using TransientStateLibrary for IPoolManager;

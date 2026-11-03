@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+/// @notice Claims the caller's dividends from many tax tokens in one call.
 interface ITaxDividendClaimHelper {
     struct Claim {
         address token;

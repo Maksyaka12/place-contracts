@@ -8,8 +8,8 @@ interface ITaxLaunchTokenFactory {
 }
 
 /// @title TaxLaunchTokenDeployer
-/// @notice One-purpose CREATE2 deployer for ERC20 launch tokens. It keeps token creation bytecode out of the
-///         ERC20 launchpad factory while preserving deterministic token addresses and genesis metadata.
+/// @notice One-purpose CREATE2 deployer for tax launch tokens. It keeps the token creation bytecode out of the
+///         factory, which keeps the factory under the size limit, while token addresses stay deterministic.
 contract TaxLaunchTokenDeployer {
     address public immutable factoryInitializer;
     address public factory;

@@ -4,7 +4,8 @@ pragma solidity 0.8.26;
 import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @notice Inclusive ordinary tax, precise post-protocol allocations and mixed-currency settlement.
+/// @notice Fee math for the tax suite: policy validation, the protocol cut, the split of the remainder, the
+///         anti-snipe surcharge and swap fee amounts. Every rounding rule is defined here.
 library TaxFeeMath {
     uint256 internal constant PERCENTAGE_SCALE = TaxSuiteConstants.PERCENTAGE_SCALE;
     uint256 internal constant RATE_SCALE = TaxSuiteConstants.RATE_SCALE;

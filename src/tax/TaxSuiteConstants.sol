@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-/// @notice Shared compile-time limits. Public contract getters remain aliases for ABI compatibility.
+/// @notice Shared compile-time constants. Contracts expose some of them as public constants.
 library TaxSuiteConstants {
     uint256 internal constant BPS = 10_000;
     uint256 internal constant PERCENTAGE_SCALE = 100_000_000;

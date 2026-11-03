@@ -79,7 +79,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
     );
     error DividendsDisabled();
     error AntiSnipeUnavailable();
-    // Keep delegated validation errors in the factory ABI for existing error decoders.
+    // Raised by TaxLaunchValidation and redeclared here so they appear in the factory ABI.
     error InvalidTaxBounds();
     error InvalidTaxConfiguration();
 

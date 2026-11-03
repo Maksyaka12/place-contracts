@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-/// @notice Synchronous shares, fee accrual and holder-authorized withdrawals with lazy funding.
-/// @dev Factory administration uses the typed TaxDividend contract, not an arbitrary executor.
+/// @notice Per-token dividend tracker. The token updates holder shares on every balance change, the hook
+///         reports dividend fees during swaps, and holders withdraw their earnings.
+/// @dev The fees stay in FeeEscrow until a withdrawal needs them, then the tracker redeems them.
 interface ITaxDividend {
     function owner() external view returns (address);
     function taxToken() external view returns (address);

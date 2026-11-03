@@ -6,7 +6,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @notice Arc rewards use ERC20 units, including USDC's six-decimal view of the native balance.
+/// @title ArcTaxDividend
+/// @notice `TaxDividend` for Arc (chain id 5042), where USDC is the native gas currency.
+/// @dev `TaxDividend` handles native-quote pools by wrapping and unwrapping the native currency through a
+///      WETH-style contract. Arc has no such wrapper: its USDC ERC20 at `0x3600...0000` is a six-decimal view
+///      of the native balance. This version therefore rejects native-quote launches and always pays the
+///      quote token through an ERC20 transfer. Everything else is inherited unchanged.
 contract ArcTaxDividend is TaxDividend {
     using SafeERC20 for IERC20;
 

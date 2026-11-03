@@ -7,8 +7,9 @@ import {ITaxDividend} from "./interfaces/ITaxDividend.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 /// @title TaxLaunchToken
-/// @notice Fixed-supply ERC20 for the separate tax suite, with optional permanent dividend binding. The constructor mints once to
-///         one factory-supplied genesis recipient. There is no owner, minter, burner, pauser, upgrade hook, or admin.
+/// @notice Fixed-supply ERC20 for tax suite launches, with an optional permanent dividend binding. The constructor
+///         mints the whole supply once, to a recipient the factory chooses. There is no owner, minter, burner,
+///         pauser, upgrade hook or admin.
 contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
     struct GenesisParams {
         address factory;
@@ -85,7 +86,8 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
         return _name;
     }
 
-    /// @dev Factory-only initialization within creation, before genesis tokens can move. Disabled tokens cannot attach one.
+    /// @dev Factory-only, during the launch transaction and before any token moves. A token launched without
+    ///      dividends can never attach a tracker.
     function initializeDividend(address dividendContract) external {
         if (msg.sender != factory || !dividendsEnabled || dividend != address(0) || dividendContract.code.length == 0) {
             revert InvalidConfig();

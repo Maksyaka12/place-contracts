@@ -17,8 +17,8 @@ import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 
-/// @notice Statically linked launch execution. Delegate execution preserves factory-only wiring and atomic rollback.
-/// @dev No mutable implementation, selector dispatcher, generic executor, or independently held launch assets.
+/// @notice Linked library with part of the factory's launch and policy logic, split out to keep the factory under
+///         the contract size limit. It runs by DELEGATECALL in the factory's context and holds no state or assets.
 library TaxLaunchOperations {
     struct PolicyState {
         TaxFeeMath.TaxPolicy policy;

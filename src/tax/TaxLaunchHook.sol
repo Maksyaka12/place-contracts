@@ -8,7 +8,6 @@ import {TaxFeeMath} from "./TaxFeeMath.sol";
 import {TaxDividend} from "./TaxDividend.sol";
 import {ITaxDividend} from "./interfaces/ITaxDividend.sol";
 import {TaxLaunchToken} from "./TaxLaunchToken.sol";
-import {LaunchConsent} from "./LaunchConsent.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -52,7 +51,8 @@ contract TaxLaunchHook is BaseHook, Initializable {
     mapping(address dividend => bool registered) public isDividendContract;
     uint256 public constant MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH = TaxSuiteConstants.MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH;
 
-    /// @notice Frozen execution economics; creator and creator payout retain their existing authorized updates.
+    /// @notice Per-pool economics, frozen at launch. Only the creator and creator fee recipient can change
+    ///         later, through the factory's creator rights functions.
     struct PoolConfig {
         bool initialized;
         bool tokenIsCurrency0;
@@ -111,8 +111,6 @@ contract TaxLaunchHook is BaseHook, Initializable {
 
     mapping(PoolId poolId => PoolConfig configuration) public poolConfig;
     LaunchBuyContext internal _launchBuyContext;
-    /// @notice Records the integrator's acceptance of the frozen launch terms.
-    mapping(PoolId poolId => bool accepted) public launchConsented;
 
     error NotDeployer();
     error NotFactory();
@@ -162,6 +160,7 @@ contract TaxLaunchHook is BaseHook, Initializable {
     event Seeded(PoolId indexed poolId, uint256 tokenAmountSeeded);
     /// @notice One record per successful registered-pool swap, including zero rounded quote fees.
     /// @dev quoteCurrency/quoteFeeAmount cover quote fees only; BurnTaxCredited records launched-token allocation.
+    ///      `referrer` is always zero and remains for event compatibility.
     event Trade(
         PoolId indexed poolId,
         address indexed executor,
@@ -202,8 +201,8 @@ contract TaxLaunchHook is BaseHook, Initializable {
     /// @notice One-time wiring of the factory + fee escrow (breaks the deploy cycle: hook is deployed first).
     /// @dev    Guarded by OpenZeppelin's `initializer` modifier (set-once, the standard initialization pattern)
     ///         on top of the deployer-only authorization check, so it can never be re-run. To also close the
-    ///         deploy-time window, only the designated initializer can complete wiring. The tax-suite script
-    ///         prepares multiple transactions and leaves creation disabled; see TAX_TOKEN_SUITE_DEPLOYMENT.md.
+    ///         deploy-time window, only the designated initializer can complete wiring. Launch creation
+    ///         stays disabled until the owner enables it.
     function initialize(address factoryAddress, address feeEscrowAddress) external initializer {
         if (msg.sender != deployer) revert NotDeployer();
         if (factoryAddress == address(0) || feeEscrowAddress == address(0)) revert ZeroAddress();
@@ -232,15 +231,6 @@ contract TaxLaunchHook is BaseHook, Initializable {
         if (!tokenIsCurrency0 && Currency.unwrap(key.currency1) != registration.token) revert BadWiring();
         address quoteToken = Currency.unwrap(tokenIsCurrency0 ? key.currency1 : key.currency0);
         _validateRegistration(registration);
-        LaunchConsent.requireConsent(
-            launchConsented,
-            key,
-            tokenIsCurrency0,
-            registration.integratorFeeRecipient,
-            registration.creator,
-            registration.antiSnipeEnabled,
-            registration.taxConfiguration
-        );
         TaxLaunchToken token = TaxLaunchToken(registration.token);
         if (token.factory() != factory || token.dividend() != registration.dividend) revert BadWiring();
         if (registration.dividend != address(0)) {
@@ -622,7 +612,9 @@ contract TaxLaunchHook is BaseHook, Initializable {
         uint256 sideTax = cfg.taxConfiguration.sellTaxRate;
         if (isBuy) sideTax = cfg.taxConfiguration.buyTaxRate;
         if (cfg.antiSnipeConfiguration.startTotalFeeRate == sideTax) return false;
+        // forge-lint: disable-next-line(block-timestamp) the anti-snipe window is measured in seconds by design
         if (block.timestamp <= cfg.launchTime) return true;
+        // forge-lint: disable-next-line(block-timestamp) the anti-snipe window is measured in seconds by design
         return block.timestamp - cfg.launchTime < cfg.antiSnipeConfiguration.windowSeconds;
     }
 
@@ -638,11 +630,14 @@ contract TaxLaunchHook is BaseHook, Initializable {
         int128 deltaAmount = delta.amount0();
         if (unspecifiedIsCurrency1) deltaAmount = delta.amount1();
         // Widen before negation so int128.min is handled without overflowing.
+        // forge-lint: disable-next-line(unsafe-typecast) the negated int128 value is positive and fits uint256
         if (deltaAmount < 0) return uint256(-int256(deltaAmount));
+        // forge-lint: disable-next-line(unsafe-typecast) deltaAmount is non-negative here
         return uint256(int256(deltaAmount));
     }
 
-    /// @dev Preserve the existing comment offset; the first word has no financial referral meaning.
+    /// @dev Optional trade comment. The first 32-byte word of `hookData` is reserved and ignored; the second
+    ///      word is emitted as `comment` in `Trade`.
     function _parseComment(bytes calldata hookData) internal pure returns (bytes32 comment) {
         if (hookData.length >= 64) comment = bytes32(hookData[32:64]);
     }

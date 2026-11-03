@@ -15,7 +15,8 @@ import {TaxLaunchHook} from "./TaxLaunchHook.sol";
 import {TaxLaunchTokenDeployer} from "./TaxLaunchTokenDeployer.sol";
 
 /// @title TaxRWAERC20LaunchpadFactory
-/// @notice Managed ERC20 launch factory serving standard and RWA routes on Base, Monad and Robinhood.
+/// @notice The tax suite factory to deploy. It accepts any registered quote token, including tokenized
+///         real-world assets (RWA), each with its own opening tick that the owner or price updater maintains.
 contract TaxRWAERC20LaunchpadFactory is TaxERC20FactoryBase {
     uint256 public constant MAX_QUOTE_BATCH_SIZE = TaxSuiteConstants.MAX_BATCH_SIZE;
     uint8 public constant TOKEN_ADDRESS_SUFFIX = 0x01;

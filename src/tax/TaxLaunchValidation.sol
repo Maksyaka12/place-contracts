@@ -75,7 +75,7 @@ contract TaxLaunchValidation {
         _validateConfiguredRecipients(factory, context, address(0), address(0));
     }
 
-    /// @dev The derived constructor supplies bindings explicitly; the factory has no runtime getters yet.
+    /// @dev Called from the factory constructor, before its getters exist, so bindings are passed explicitly.
     function validateInitialDeploymentRecipients(
         address protocolFeeRecipient,
         address factory,
@@ -189,7 +189,7 @@ contract TaxLaunchValidation {
         );
     }
 
-    /// @dev Constructor validation uses explicit bindings before runtime getters exist.
+    /// @dev Called from the factory constructor, before its getters exist, so bindings are passed explicitly.
     function validateInitialTaxPolicy(
         TaxFeeMath.TaxPolicy calldata policy,
         uint256 supply,
