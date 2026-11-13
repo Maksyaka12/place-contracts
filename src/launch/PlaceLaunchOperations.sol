@@ -133,6 +133,7 @@ library PlaceLaunchOperations {
         PlaceLaunchHook hook;
         PlaceLaunchTokenDeployer tokenDeployer;
         PlaceFeeMath.TaxPolicy admittedPolicy;
+        PlaceFeeMath.TaxConfiguration taxConfiguration;
     }
     error InvalidConfig();
     error TokenMismatch();
@@ -173,11 +174,11 @@ library PlaceLaunchOperations {
             token: token,
             creator: originalCreator,
             creatorFeeRecipient: params.creatorFeeRecipient,
-            integratorFeeRecipient: params.integratorFeeRecipient,
+            integratorFeeRecipient: address(0),
             launchTime: uint48(block.timestamp),
-            antiSnipeEnabled: params.antiSnipeEnabled,
+            antiSnipeEnabled: true,
             admittedPolicy: context.admittedPolicy,
-            taxConfiguration: params.taxConfiguration
+            taxConfiguration: context.taxConfiguration
         });
         context.hook.registerPool(key, registration);
         context.hook.seedLiquidity(key, preparation.seedPositions, preparation.tokenIsCurrency0);

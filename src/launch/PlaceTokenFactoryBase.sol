@@ -30,10 +30,7 @@ abstract contract PlaceTokenFactoryBase is PlaceLaunchFactoryCore {
         ) revert InvalidConfig();
         tokenDeployer = launchTokenDeployer;
         launchValidation.validateInitialDeploymentRecipients(
-            initialFactoryConfiguration.taxPolicy.protocolFeeConfiguration.protocolFeeRecipient,
-            address(this),
-            launchHook,
-            address(launchTokenDeployer)
+            initialFactoryConfiguration.protocolFeeRecipient, address(this), launchHook, address(launchTokenDeployer)
         );
     }
 
@@ -57,7 +54,7 @@ abstract contract PlaceTokenFactoryBase is PlaceLaunchFactoryCore {
         returns (address token, PoolId poolId, PoolKey memory key)
     {
         return PlaceLaunchOperations.create(
-            PlaceLaunchOperations.Context(hook, tokenDeployer, _policyState.policy),
+            PlaceLaunchOperations.Context(hook, tokenDeployer, _policyState.policy, placeTaxConfiguration()),
             params,
             preparation,
             isFactoryToken,

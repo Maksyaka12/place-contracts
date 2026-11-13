@@ -77,7 +77,7 @@ contract PlaceLaunchValidation {
     }
 
     function validateLaunchTax(
-        PlaceFeeMath.TaxConfiguration calldata tax,
+        PlaceFeeMath.TaxConfiguration memory tax,
         PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
         bool antiSnipeEnabled
@@ -87,7 +87,7 @@ contract PlaceLaunchValidation {
     }
 
     function previewTaxConfiguration(
-        PlaceFeeMath.TaxConfiguration calldata tax,
+        PlaceFeeMath.TaxConfiguration memory tax,
         PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
         uint64 configVersion

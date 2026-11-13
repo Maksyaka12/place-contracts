@@ -86,13 +86,36 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         return _policyState.policy;
     }
 
-    function previewTaxConfiguration(PlaceFeeMath.TaxConfiguration calldata configuration)
-        external
-        view
-        override
-        returns (PlaceFeeMath.TaxConfigurationPreview memory)
-    {
-        return launchValidation.previewTaxConfiguration(configuration, _policyState.policy, launchSupply, configVersion);
+    /// @notice Place: the fee rates every launch gets (no per-launch choice).
+    function previewTaxConfiguration() external view override returns (PlaceFeeMath.TaxConfigurationPreview memory) {
+        return launchValidation.previewTaxConfiguration(
+            placeTaxConfiguration(), _policyState.policy, launchSupply, configVersion
+        );
+    }
+
+    /// @notice Place: the fixed per-launch fee configuration. 1% on buys and sells; the protocol cut (25% of
+    ///         the fee, see `_placePolicy`) comes off the top and the whole remainder goes to the creator side.
+    ///         No burn, dividend or integrator share.
+    function placeTaxConfiguration() public pure returns (PlaceFeeMath.TaxConfiguration memory configuration) {
+        configuration.buyTaxRate = PlaceSuiteConstants.PLACE_FEE_RATE;
+        configuration.sellTaxRate = PlaceSuiteConstants.PLACE_FEE_RATE;
+        configuration.creatorAllocationShare = uint32(PlaceSuiteConstants.PERCENTAGE_SCALE);
+    }
+
+    /// @notice Place: the fixed policy. Only the protocol fee recipient is a parameter.
+    function _placePolicy(address protocolFeeRecipient) internal pure returns (PlaceFeeMath.TaxPolicy memory policy) {
+        uint32 rate = PlaceSuiteConstants.PLACE_FEE_RATE;
+        policy.taxFeeBounds = PlaceFeeMath.TaxFeeBounds(rate, rate, rate, rate);
+        policy.protocolFeeConfiguration = PlaceFeeMath.ProtocolFeeConfiguration({
+            protocolTaxShare: PlaceSuiteConstants.PLACE_PROTOCOL_SHARE,
+            minimumProtocolFeeRate: PlaceSuiteConstants.PLACE_PROTOCOL_FEE_RATE,
+            maximumProtocolFeeRate: PlaceSuiteConstants.PLACE_PROTOCOL_FEE_RATE,
+            protocolFeeRecipient: protocolFeeRecipient
+        });
+        policy.antiSnipeConfiguration = PlaceFeeMath.AntiSnipeConfiguration({
+            startTotalFeeRate: PlaceSuiteConstants.ANTI_SNIPE_START_FEE_RATE,
+            windowSeconds: PlaceSuiteConstants.ANTI_SNIPE_WINDOW_SECONDS
+        });
     }
 
     struct CreatorRights {
@@ -128,10 +151,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         bool metadataEditable;
         string[] metadataKeys;
         string[] metadataValues;
-        PlaceFeeMath.TaxConfiguration taxConfiguration;
         address creatorFeeRecipient;
-        address integratorFeeRecipient;
-        bool antiSnipeEnabled;
     }
 
     struct LaunchBuyParams {
@@ -238,11 +258,12 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
     error InvalidLaunchBuyPayment(uint256 expectedValue, uint256 actualValue);
 
     /// @notice Genesis economics supplied explicitly at deploy. Each field is validated with the same logic as
-    ///         its governance setter and stays tunable for future launches.
+    ///         its governance setter and stays tunable for future launches. Place: the fee policy is fixed
+    ///         (`_placePolicy`), so only its recipient is supplied.
     struct FactoryInitialization {
         uint256 launchSupply;
         int24 tickSpacing;
-        PlaceFeeMath.TaxPolicy taxPolicy;
+        address protocolFeeRecipient;
         Band[] bandTemplate;
     }
 
@@ -262,10 +283,16 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         _setLaunchSupply(initialFactoryConfiguration.launchSupply);
         _applyTickSpacing(initialFactoryConfiguration.tickSpacing);
         PlaceLaunchOperations.initializeTaxPolicy(
-            _policyState, initialFactoryConfiguration.taxPolicy, launchValidation, hook, launchSupply
+            _policyState,
+            _placePolicy(initialFactoryConfiguration.protocolFeeRecipient),
+            launchValidation,
+            hook,
+            launchSupply
         );
         _applyBandTemplate(initialFactoryConfiguration.bandTemplate);
         PlaceLaunchOperations.emitTaxPolicy(_policyState, configVersion);
+        nativeLaunchFee = PlaceSuiteConstants.NATIVE_LAUNCH_FEE;
+        emit NativeLaunchFeeUpdated(0, PlaceSuiteConstants.NATIVE_LAUNCH_FEE);
     }
 
     // ============================================================
@@ -347,13 +374,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
 
         AnnouncementRegistry(announcementRegistry).registerToken(token);
         emit LaunchTaxConfigured(
-            poolId,
-            token,
-            configVersion,
-            _policyState.policy,
-            launchParams.taxConfiguration,
-            launchParams.integratorFeeRecipient,
-            launchParams.antiSnipeEnabled
+            poolId, token, configVersion, _policyState.policy, placeTaxConfiguration(), address(0), true
         );
         emit Launched(token, poolId, originalCreator, launchParams.quoteToken, preparation.supply, preparation.spacing);
     }
@@ -376,13 +397,8 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
             if (bytes(launchParams.metadataKeys[i]).length == 0) revert InvalidConfig();
         }
 
-        launchValidation.validateLaunchTax(
-            launchParams.taxConfiguration, _policyState.policy, launchSupply, launchParams.antiSnipeEnabled
-        );
-        if (
-            launchParams.taxConfiguration.integratorAllocationShare != 0
-                && launchParams.integratorFeeRecipient == address(0)
-        ) revert InvalidConfig();
+        // Place: fixed fee configuration, anti-snipe always on, no integrator (no referrals yet).
+        launchValidation.validateLaunchTax(placeTaxConfiguration(), _policyState.policy, launchSupply, true);
         _beforeCreateLaunch(launchParams);
 
         preparation.supply = launchSupply;
@@ -392,7 +408,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         preparation.predictedToken = _predictTokenAddress(launchParams, preparation.scopedSalt, preparation.supply);
         _validatePredictedToken(preparation.predictedToken);
         launchValidation.validateLaunchRecipients(
-            this, launchParams.creatorFeeRecipient, launchParams.integratorFeeRecipient, preparation.predictedToken
+            this, launchParams.creatorFeeRecipient, address(0), preparation.predictedToken
         );
         preparation.tokenIsCurrency0 = uint160(preparation.predictedToken) < uint160(launchParams.quoteToken);
         preparation.spacing = tickSpacing;
@@ -628,34 +644,10 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         _validateCreatorRightsAddress(address(0), newCreatorAdmin);
     }
 
-    function setTaxPolicy(PlaceFeeMath.TaxPolicy calldata policy) external override onlyOwner {
-        _applyTaxPolicy(policy);
-    }
-
-    function setTaxFeeBounds(PlaceFeeMath.TaxFeeBounds calldata bounds) external override onlyOwner {
-        PlaceFeeMath.TaxPolicy memory policy = _policyState.policy;
-        policy.taxFeeBounds = bounds;
-        _applyTaxPolicy(policy);
-    }
-
-    function setProtocolFeeConfiguration(PlaceFeeMath.ProtocolFeeConfiguration calldata configuration)
-        external
-        override
-        onlyOwner
-    {
-        PlaceFeeMath.TaxPolicy memory policy = _policyState.policy;
-        policy.protocolFeeConfiguration = configuration;
-        _applyTaxPolicy(policy);
-    }
-
-    function setAntiSnipeConfiguration(PlaceFeeMath.AntiSnipeConfiguration calldata configuration)
-        external
-        override
-        onlyOwner
-    {
-        PlaceFeeMath.TaxPolicy memory policy = _policyState.policy;
-        policy.antiSnipeConfiguration = configuration;
-        _applyTaxPolicy(policy);
+    /// @notice Place: the only policy setter. Rates are fixed; the recipient applies to future launches only
+    ///         (each pool freezes the recipient it launched with).
+    function setProtocolFeeRecipient(address protocolFeeRecipient) external override onlyOwner {
+        _applyTaxPolicy(_placePolicy(protocolFeeRecipient));
     }
 
     function _applyTaxPolicy(PlaceFeeMath.TaxPolicy memory policy) internal {
