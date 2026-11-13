@@ -10,7 +10,7 @@ via_ir = true
 # Base hardfork with the B20 precompiles (L0, LAUNCH.md §8.4). B20 itself only runs on a fork of
 # Base Sepolia or Base: locally `createB20` reverts with FeatureNotActivated.
 hardfork = "base:Cobalt"
-fs_permissions = [{ access = "read", path = "./" }]
+fs_permissions = [{ access = "read", path = "./" }, { access = "read-write", path = "./deployments" }]
 
 [fuzz]
 runs = 512
@@ -31,3 +31,7 @@ base = "${BASE_RPC_URL}"
 line_length = 120
 
 # See https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[etherscan]
+base = { key = "${BASESCAN_API_KEY}", chain = 8453 }
+base_sepolia = { key = "${BASESCAN_API_KEY}", chain = 84532 }

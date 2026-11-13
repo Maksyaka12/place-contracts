@@ -16,7 +16,7 @@ The full specification lives in [`docs/LAUNCH.md`](https://github.com/Maksyaka12
 
 This repository is a fork of [`o1exchange/o1-launch-contracts`](https://github.com/o1exchange/o1-launch-contracts) (MIT), starting from commit `3a49099`: the o1 tax suite as deployed on Base and five other chains. We keep o1's history, copyright and license. Place removes taxes and dividends and adds B20 tokens, the fixed 75/25 fee split, buyback at claim and the link to the Place hub.
 
-**Status:** stage L1 (contracts) done on `dev`; `main` holds the unmodified o1 code. Nothing is deployed by Place yet (Base Sepolia is stage L2), and Place's changes are **not audited** (a delta audit is required before mainnet). The list of changes against o1 is in `docs/LAUNCH.md` §9 of `place-web`.
+**Status:** stage L1 (contracts) done on `dev`; `main` holds the unmodified o1 code. Stage L2: deployed to Base Sepolia, addresses in [`DEPLOYMENTS.md`](DEPLOYMENTS.md), and Place's changes are **not audited** (a delta audit is required before mainnet). The list of changes against o1 is in `docs/LAUNCH.md` §9 of `place-web`.
 
 ## Build
 
@@ -47,6 +47,8 @@ Please report vulnerabilities privately, not in public issues. See [SECURITY.md]
 | `src/FeeEscrow.sol`, `src/AnnouncementRegistry.sol`, `src/base/` | o1, unchanged apart from the header |
 | `script/DeployPlaceLaunch.s.sol` | mines the hook address and deploys + wires the suite |
 | `script/RegisterQuotes.s.sol`, `script/quotes/base.json` | launch pairs on Base, batches of 64 |
+| `script/L2Sepolia.s.sol`, `script/L2LiveRun.s.sol` | stage L2: Base Sepolia deploy and live run (launch, swaps through the Universal Router, claim, hub campaign) |
+| `rules/launch-holders-v1.json` | rules template committed by creator vaults for holder campaigns |
 
 ## Test
 
