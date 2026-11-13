@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
-import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
+import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 
-import {TaxERC20FactoryBase} from "./TaxERC20FactoryBase.sol";
+import {PlaceTokenFactoryBase} from "./PlaceTokenFactoryBase.sol";
 import {IRWAQuoteRegistry} from "../interfaces/IRWAQuoteRegistry.sol";
-import {TaxLaunchOperations} from "./TaxLaunchOperations.sol";
+import {PlaceLaunchOperations} from "./PlaceLaunchOperations.sol";
 
-import {TaxDividendDeployer} from "./TaxDividendDeployer.sol";
+import {PlaceLaunchHook} from "./PlaceLaunchHook.sol";
+import {PlaceLaunchTokenDeployer} from "./PlaceLaunchTokenDeployer.sol";
 
-import {TaxLaunchHook} from "./TaxLaunchHook.sol";
-import {TaxLaunchTokenDeployer} from "./TaxLaunchTokenDeployer.sol";
-
-/// @title TaxRWAERC20LaunchpadFactory
-/// @notice The tax suite factory to deploy. It accepts any registered quote token, including tokenized
+/// @title PlaceLaunchFactory
+/// @notice The Place Launch factory to deploy. It accepts any registered quote token, including tokenized
 ///         real-world assets (RWA), each with its own opening tick that the owner or price updater maintains.
-contract TaxRWAERC20LaunchpadFactory is TaxERC20FactoryBase {
-    uint256 public constant MAX_QUOTE_BATCH_SIZE = TaxSuiteConstants.MAX_BATCH_SIZE;
+contract PlaceLaunchFactory is PlaceTokenFactoryBase {
+    uint256 public constant MAX_QUOTE_BATCH_SIZE = PlaceSuiteConstants.MAX_BATCH_SIZE;
     uint8 public constant TOKEN_ADDRESS_SUFFIX = 0x01;
 
     address public priceUpdater;
@@ -44,15 +43,10 @@ contract TaxRWAERC20LaunchpadFactory is TaxERC20FactoryBase {
 
     constructor(
         IPoolManager poolManagerAddress,
-        TaxLaunchHook launchHook,
-        TaxLaunchTokenDeployer launchTokenDeployer,
-        TaxDividendDeployer launchDividendDeployer,
+        PlaceLaunchHook launchHook,
+        PlaceLaunchTokenDeployer launchTokenDeployer,
         FactoryInitialization memory initialFactoryConfiguration
-    )
-        TaxERC20FactoryBase(
-            poolManagerAddress, launchHook, launchTokenDeployer, launchDividendDeployer, initialFactoryConfiguration
-        )
-    {}
+    ) PlaceTokenFactoryBase(poolManagerAddress, launchHook, launchTokenDeployer, initialFactoryConfiguration) {}
 
     function registerQuote(address quoteToken, int24 startTickToken0Frame) public onlyOwner nonReentrant {
         _registerQuote(quoteToken, startTickToken0Frame);
@@ -137,7 +131,7 @@ contract TaxRWAERC20LaunchpadFactory is TaxERC20FactoryBase {
     }
 
     function launchTokenInitCodeHash(LaunchParams calldata launchParams) external view returns (bytes32 initCodeHash) {
-        return TaxLaunchOperations.tokenInitCodeHash(tokenDeployer, launchParams, launchSupply, hook);
+        return PlaceLaunchOperations.tokenInitCodeHash(tokenDeployer, launchParams, launchSupply, hook);
     }
 
     function _beforeCreateLaunch(LaunchParams calldata launchParams) internal view override {
@@ -208,8 +202,6 @@ contract TaxRWAERC20LaunchpadFactory is TaxERC20FactoryBase {
 
     function _requireLaunchCreationWiring() internal view override {
         super._requireLaunchCreationWiring();
-        if (tokenDeployer.factory() != address(this) || dividendDeployer.factory() != address(this)) {
-            revert InvalidConfig();
-        }
+        if (tokenDeployer.factory() != address(this)) revert InvalidConfig();
     }
 }

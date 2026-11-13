@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
-import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
+import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
 
 import {BaseHook} from "../base/BaseHook.sol";
 import {FeeEscrow} from "../FeeEscrow.sol";
-import {TaxFeeMath} from "./TaxFeeMath.sol";
-import {TaxDividend} from "./TaxDividend.sol";
-import {ITaxDividend} from "./interfaces/ITaxDividend.sol";
-import {TaxLaunchToken} from "./TaxLaunchToken.sol";
+import {PlaceFeeMath} from "./PlaceFeeMath.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -27,9 +25,10 @@ import {ILaunchBuyAdapter} from "../interfaces/ILaunchBuyAdapter.sol";
 interface IWiredFactory {
     function hook() external view returns (address launchHook);
     function poolManager() external view returns (address manager);
+    function isFactoryToken(address token) external view returns (bool);
 }
 
-/// @title TaxLaunchHook
+/// @title PlaceLaunchHook
 /// @notice The single shared Uniswap v4 hook for every launch in one deployment suite. It:
 ///         - gates pool creation to the launchpad factory (`beforeInitialize`),
 ///         - blocks all third-party liquidity adds/removes, and owns the permanently locked
@@ -40,16 +39,15 @@ interface IWiredFactory {
 /// @dev    One deployment, reused by all launches; per-pool economics are frozen at launch in `poolConfig`.
 ///         Deployed at a CREATE2-mined address whose low 14 bits equal `getHookPermissions()` (BaseHook
 ///         validates this in the constructor). Fee custody lives in the FeeEscrow, not here.
-contract TaxLaunchHook is BaseHook, Initializable {
+contract PlaceLaunchHook is BaseHook, Initializable {
     using CurrencySettler for Currency;
     using SafeCast for uint256;
 
     /// @notice Inclusive ordinary tax plus temporary surcharge stays strictly below 100%.
-    uint32 public constant MAX_TOTAL_FEE_RATE = TaxSuiteConstants.MAX_TOTAL_FEE_RATE;
-    uint256 public constant RATE_SCALE = TaxSuiteConstants.RATE_SCALE;
-    address public constant BURN_SINK = TaxSuiteConstants.BURN_SINK;
-    mapping(address dividend => bool registered) public isDividendContract;
-    uint256 public constant MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH = TaxSuiteConstants.MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH;
+    uint32 public constant MAX_TOTAL_FEE_RATE = PlaceSuiteConstants.MAX_TOTAL_FEE_RATE;
+    uint256 public constant RATE_SCALE = PlaceSuiteConstants.RATE_SCALE;
+    address public constant BURN_SINK = PlaceSuiteConstants.BURN_SINK;
+    uint256 public constant MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH = PlaceSuiteConstants.MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH;
 
     /// @notice Per-pool economics, frozen at launch. Only the creator and creator fee recipient can change
     ///         later, through the factory's creator rights functions.
@@ -60,13 +58,12 @@ contract TaxLaunchHook is BaseHook, Initializable {
         address quoteToken;
         address currentCreator;
         address creatorFeeRecipient;
-        TaxFeeMath.ProtocolFeeConfiguration protocolFeeConfiguration;
-        TaxFeeMath.AntiSnipeConfiguration antiSnipeConfiguration;
+        PlaceFeeMath.ProtocolFeeConfiguration protocolFeeConfiguration;
+        PlaceFeeMath.AntiSnipeConfiguration antiSnipeConfiguration;
         uint48 launchTime;
         bool antiSnipeEnabled;
         address integratorFeeRecipient;
-        address dividend;
-        TaxFeeMath.TaxConfiguration taxConfiguration;
+        PlaceFeeMath.TaxConfiguration taxConfiguration;
     }
 
     struct PoolRegistration {
@@ -74,11 +71,10 @@ contract TaxLaunchHook is BaseHook, Initializable {
         address creator;
         address creatorFeeRecipient;
         address integratorFeeRecipient;
-        address dividend;
         uint48 launchTime;
         bool antiSnipeEnabled;
-        TaxFeeMath.TaxPolicy admittedPolicy;
-        TaxFeeMath.TaxConfiguration taxConfiguration;
+        PlaceFeeMath.TaxPolicy admittedPolicy;
+        PlaceFeeMath.TaxConfiguration taxConfiguration;
     }
 
     enum LaunchBuyContextState {
@@ -140,10 +136,6 @@ contract TaxLaunchHook is BaseHook, Initializable {
 
     event BurnTaxCredited(PoolId indexed poolId, address indexed token, address indexed sink, uint256 amount);
     event CreatorTaxCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
-    event DividendTaxCredited(PoolId indexed poolId, address indexed dividend, address currency, uint256 amount);
-    event DividendTaxRedirected(
-        PoolId indexed poolId, address indexed recipient, address indexed currency, uint256 amount
-    );
     event IntegratorAttributed(PoolId indexed poolId, address indexed integratorFeeRecipient);
     event ProtocolFeeCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
     event IntegratorTaxCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
@@ -231,18 +223,8 @@ contract TaxLaunchHook is BaseHook, Initializable {
         if (!tokenIsCurrency0 && Currency.unwrap(key.currency1) != registration.token) revert BadWiring();
         address quoteToken = Currency.unwrap(tokenIsCurrency0 ? key.currency1 : key.currency0);
         _validateRegistration(registration);
-        TaxLaunchToken token = TaxLaunchToken(registration.token);
-        if (token.factory() != factory || token.dividend() != registration.dividend) revert BadWiring();
-        if (registration.dividend != address(0)) {
-            TaxDividend tracker = TaxDividend(payable(registration.dividend));
-            if (
-                tracker.taxToken() != registration.token || tracker.owner() != factory
-                    || tracker.hook() != address(this) || address(tracker.feeEscrow()) != feeEscrow
-                    || isDividendContract[address(tracker)] || tracker.quoteToken() != quoteToken
-                    || tracker.minimumDividendHolding() != registration.taxConfiguration.minimumDividendHolding
-            ) revert BadWiring();
-            isDividendContract[address(tracker)] = true;
-        }
+        // Place: B20 tokens have no `factory()` getter, so the factory's own registry vouches for the token.
+        if (!IWiredFactory(factory).isFactoryToken(registration.token)) revert BadWiring();
         PoolId poolId = key.toId();
         if (poolConfig[poolId].initialized) revert AlreadyRegistered();
         poolConfig[poolId] = PoolConfig({
@@ -257,7 +239,6 @@ contract TaxLaunchHook is BaseHook, Initializable {
             launchTime: registration.launchTime,
             antiSnipeEnabled: registration.antiSnipeEnabled,
             integratorFeeRecipient: registration.integratorFeeRecipient,
-            dividend: registration.dividend,
             taxConfiguration: registration.taxConfiguration
         });
         emit IntegratorAttributed(poolId, registration.integratorFeeRecipient);
@@ -427,14 +408,14 @@ contract TaxLaunchHook is BaseHook, Initializable {
                 revert ExactOutputDisabledDuringAntiSnipe();
             }
         }
-        TaxFeeMath.Rates memory rate = _rates(cfg, params.zeroForOne != cfg.tokenIsCurrency0, activeLaunchBuy);
+        PlaceFeeMath.Rates memory rate = _rates(cfg, params.zeroForOne != cfg.tokenIsCurrency0, activeLaunchBuy);
         uint256 specifiedRate = rate.burnRate;
         uint256 otherRate = rate.quoteRate;
         if (quoteIsSpecified) {
             specifiedRate = rate.quoteRate;
             otherRate = rate.burnRate;
         }
-        uint256 amount = TaxFeeMath.specifiedFee(
+        uint256 amount = PlaceFeeMath.specifiedFee(
             _specifiedMagnitude(params.amountSpecified), specifiedRate, otherRate, params.amountSpecified > 0
         );
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(amount.toInt128(), 0), 0);
@@ -460,7 +441,7 @@ contract TaxLaunchHook is BaseHook, Initializable {
                 revert ExactOutputDisabledDuringAntiSnipe();
             }
         }
-        TaxFeeMath.Rates memory rate = _rates(cfg, isBuy, activeLaunchBuy);
+        PlaceFeeMath.Rates memory rate = _rates(cfg, isBuy, activeLaunchBuy);
         uint256 specifiedRate = rate.burnRate;
         uint256 otherRate = rate.quoteRate;
         if (quoteIsSpecified) {
@@ -468,13 +449,14 @@ contract TaxLaunchHook is BaseHook, Initializable {
             otherRate = rate.burnRate;
         }
         bool exactOutput = params.amountSpecified > 0;
-        uint256 specifiedFee =
-            TaxFeeMath.specifiedFee(_specifiedMagnitude(params.amountSpecified), specifiedRate, otherRate, exactOutput);
+        uint256 specifiedFee = PlaceFeeMath.specifiedFee(
+            _specifiedMagnitude(params.amountSpecified), specifiedRate, otherRate, exactOutput
+        );
         if (specifiedFee != 0 || exactOutput || activeLaunchBuy) {
             _requireFullSpecifiedFill(params, delta, specifiedFee);
         }
         uint256 poolUnspecified = _unspecifiedMagnitude(params, delta);
-        uint256 unspecifiedFee = TaxFeeMath.unspecifiedFee(poolUnspecified, specifiedRate, otherRate, exactOutput);
+        uint256 unspecifiedFee = PlaceFeeMath.unspecifiedFee(poolUnspecified, specifiedRate, otherRate, exactOutput);
         uint256 quoteFee = unspecifiedFee;
         uint256 burnFee = specifiedFee;
         if (quoteIsSpecified) {
@@ -503,7 +485,7 @@ contract TaxLaunchHook is BaseHook, Initializable {
         PoolConfig memory cfg,
         Currency currency,
         uint256 amount,
-        TaxFeeMath.Rates memory rate,
+        PlaceFeeMath.Rates memory rate,
         bytes calldata hookData,
         PoolId poolId,
         address sender
@@ -516,7 +498,7 @@ contract TaxLaunchHook is BaseHook, Initializable {
             uint256 creatorAmount,
             uint256 dividendAmount,
             uint256 integratorAmount
-        ) = TaxFeeMath.splitQuoteFee(amount, rate);
+        ) = PlaceFeeMath.splitQuoteFee(amount, rate);
         FeeEscrow escrow = FeeEscrow(feeEscrow);
         address asset = Currency.unwrap(currency);
         address protocolRecipient = cfg.protocolFeeConfiguration.protocolFeeRecipient;
@@ -532,18 +514,8 @@ contract TaxLaunchHook is BaseHook, Initializable {
             escrow.credit(cfg.creatorFeeRecipient, asset, creatorAmount);
             emit CreatorTaxCredited(poolId, cfg.creatorFeeRecipient, asset, creatorAmount);
         }
-        if (dividendAmount != 0) {
-            if (cfg.dividend == address(0)) revert BadWiring();
-            ITaxDividend tracker = ITaxDividend(cfg.dividend);
-            if (tracker.totalShares() == 0) {
-                escrow.credit(protocolRecipient, asset, dividendAmount);
-                emit DividendTaxRedirected(poolId, protocolRecipient, asset, dividendAmount);
-            } else {
-                escrow.credit(cfg.dividend, asset, dividendAmount);
-                tracker.notifyDividendFee(dividendAmount);
-                emit DividendTaxCredited(poolId, cfg.dividend, asset, dividendAmount);
-            }
-        }
+        // Place: no dividends. Registration rejects a nonzero dividend share, so this amount is always zero.
+        if (dividendAmount != 0) revert BadWiring();
         if (integratorAmount != 0) {
             escrow.credit(cfg.integratorFeeRecipient, asset, integratorAmount);
             emit IntegratorTaxCredited(poolId, cfg.integratorFeeRecipient, asset, integratorAmount);
@@ -583,10 +555,10 @@ contract TaxLaunchHook is BaseHook, Initializable {
 
     /// @notice Quote and burn rates scaled by 1e24, including the decaying surcharge when applicable.
     /// @dev Configuration validates the combined ceiling; the calculation does not clip excess fees.
-    function _rates(PoolConfig memory cfg, bool isBuy, bool exempt) internal view returns (TaxFeeMath.Rates memory) {
+    function _rates(PoolConfig memory cfg, bool isBuy, bool exempt) internal view returns (PlaceFeeMath.Rates memory) {
         uint256 sideTax = cfg.taxConfiguration.sellTaxRate;
         if (isBuy) sideTax = cfg.taxConfiguration.buyTaxRate;
-        uint256 extra = TaxFeeMath.surcharge(
+        uint256 extra = PlaceFeeMath.surcharge(
             sideTax,
             cfg.antiSnipeConfiguration.startTotalFeeRate,
             cfg.launchTime,
@@ -594,13 +566,13 @@ contract TaxLaunchHook is BaseHook, Initializable {
             block.timestamp,
             cfg.antiSnipeEnabled && !exempt
         );
-        return TaxFeeMath.rates(sideTax, cfg.protocolFeeConfiguration, cfg.taxConfiguration, extra);
+        return PlaceFeeMath.rates(sideTax, cfg.protocolFeeConfiguration, cfg.taxConfiguration, extra);
     }
 
     function effectiveFeeRates(PoolId poolId, bool isBuy)
         external
         view
-        returns (TaxFeeMath.Rates memory rate, bool exactOutputRestricted)
+        returns (PlaceFeeMath.Rates memory rate, bool exactOutputRestricted)
     {
         PoolConfig memory cfg = poolConfig[poolId];
         if (!cfg.initialized) revert InvalidFeeConfig();
@@ -682,15 +654,14 @@ contract TaxLaunchHook is BaseHook, Initializable {
     }
 
     function _validateRegistration(PoolRegistration calldata registration) internal view {
-        bool enabled = TaxFeeMath.validateTax(
-            registration.taxConfiguration, registration.admittedPolicy, TaxLaunchToken(registration.token).totalSupply()
+        bool enabled = PlaceFeeMath.validateTax(
+            registration.taxConfiguration, registration.admittedPolicy, IERC20(registration.token).totalSupply()
         );
         if (registration.antiSnipeEnabled && registration.admittedPolicy.antiSnipeConfiguration.windowSeconds == 0) {
             revert AntiSnipeUnavailable();
         }
-        if (enabled != (registration.dividend != address(0)) || registration.creator == address(0)) {
-            revert InvalidFeeConfig();
-        }
+        // Place: `enabled` means a dividend share, which Place never admits.
+        if (enabled || registration.creator == address(0)) revert InvalidFeeConfig();
         _validateConfiguredFeeRecipient(registration.creatorFeeRecipient);
         _validateConfiguredFeeRecipient(registration.admittedPolicy.protocolFeeConfiguration.protocolFeeRecipient);
         if (registration.integratorFeeRecipient != address(0)) {
@@ -698,20 +669,12 @@ contract TaxLaunchHook is BaseHook, Initializable {
         } else if (registration.taxConfiguration.integratorAllocationShare != 0) {
             revert InvalidFeeConfig();
         }
-        if (
-            registration.dividend != address(0)
-                && (registration.creatorFeeRecipient == registration.dividend
-                    || registration.integratorFeeRecipient == registration.dividend
-                    || registration.admittedPolicy.protocolFeeConfiguration.protocolFeeRecipient
-                        == registration.dividend)
-        ) revert InvalidFeeConfig();
     }
 
     function _validateConfiguredFeeRecipient(address configuredRecipient) internal view {
         if (
             configuredRecipient == address(0) || configuredRecipient == address(this) || configuredRecipient == factory
                 || configuredRecipient == feeEscrow || configuredRecipient == address(poolManager)
-                || isDividendContract[configuredRecipient]
         ) revert InvalidFeeConfig();
     }
 }

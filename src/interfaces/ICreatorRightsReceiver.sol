@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// From o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099).
 pragma solidity 0.8.26;
 
 /// @notice Implemented by a contract that can receive a token's creator rights through

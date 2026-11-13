@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
 
-import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
+import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @notice Fee math for the tax suite: policy validation, the protocol cut, the split of the remainder, the
+/// @notice Swap fee math ("tax" in o1 names = swap fee): policy validation, the protocol cut, the split of the remainder, the
 ///         anti-snipe surcharge and swap fee amounts. Every rounding rule is defined here.
-library TaxFeeMath {
-    uint256 internal constant PERCENTAGE_SCALE = TaxSuiteConstants.PERCENTAGE_SCALE;
-    uint256 internal constant RATE_SCALE = TaxSuiteConstants.RATE_SCALE;
-    uint256 internal constant MAX_TOTAL_FEE_RATE = TaxSuiteConstants.MAX_TOTAL_FEE_RATE;
+library PlaceFeeMath {
+    uint256 internal constant PERCENTAGE_SCALE = PlaceSuiteConstants.PERCENTAGE_SCALE;
+    uint256 internal constant RATE_SCALE = PlaceSuiteConstants.RATE_SCALE;
+    uint256 internal constant MAX_TOTAL_FEE_RATE = PlaceSuiteConstants.MAX_TOTAL_FEE_RATE;
 
     struct TaxFeeBounds {
         uint32 minimumBuyTaxRate;

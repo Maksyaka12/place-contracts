@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
-import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
-import {TaxLaunchpadFactoryCore as Core} from "./TaxLaunchpadFactoryCore.sol";
-import {TaxLaunchValidation} from "./TaxLaunchValidation.sol";
-import {TaxFeeMath} from "./TaxFeeMath.sol";
+import {PlaceLaunchFactoryCore as Core} from "./PlaceLaunchFactoryCore.sol";
+import {PlaceLaunchValidation} from "./PlaceLaunchValidation.sol";
+import {PlaceFeeMath} from "./PlaceFeeMath.sol";
 
-import {TaxLaunchHook} from "./TaxLaunchHook.sol";
-import {TaxLaunchToken} from "./TaxLaunchToken.sol";
-import {TaxLaunchTokenDeployer} from "./TaxLaunchTokenDeployer.sol";
-import {TaxDividendDeployer} from "./TaxDividendDeployer.sol";
-import {TaxDividend} from "./TaxDividend.sol";
-import {FeeEscrow} from "../FeeEscrow.sol";
+import {PlaceLaunchHook} from "./PlaceLaunchHook.sol";
+import {PlaceLaunchToken} from "./PlaceLaunchToken.sol";
+import {PlaceLaunchTokenDeployer} from "./PlaceLaunchTokenDeployer.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
@@ -19,11 +16,11 @@ import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 
 /// @notice Linked library with part of the factory's launch and policy logic, split out to keep the factory under
 ///         the contract size limit. It runs by DELEGATECALL in the factory's context and holds no state or assets.
-library TaxLaunchOperations {
+library PlaceLaunchOperations {
     struct PolicyState {
-        TaxFeeMath.TaxPolicy policy;
+        PlaceFeeMath.TaxPolicy policy;
     }
-    event TaxPolicyUpdated(uint64 indexed configVersion, TaxFeeMath.TaxPolicy policy);
+    event TaxPolicyUpdated(uint64 indexed configVersion, PlaceFeeMath.TaxPolicy policy);
     event CreatorFeeRecipientUpdated(
         address indexed token, address indexed previousCreatorFeeRecipient, address indexed newCreatorFeeRecipient
     );
@@ -47,8 +44,8 @@ library TaxLaunchOperations {
         Core.CreatorRights storage rights,
         address token,
         address recipient,
-        TaxLaunchValidation validation,
-        TaxLaunchHook hook
+        PlaceLaunchValidation validation,
+        PlaceLaunchHook hook
     ) public {
         validation.validateFeeRecipient(recipient, Core(address(this)));
         address previousRecipient = rights.creatorFeeRecipient;
@@ -62,8 +59,8 @@ library TaxLaunchOperations {
         Core.CreatorRights storage rights,
         address token,
         address newCreator,
-        TaxLaunchValidation validation,
-        TaxLaunchHook hook
+        PlaceLaunchValidation validation,
+        PlaceLaunchHook hook
     ) public {
         validation.validateFeeRecipient(newCreator, Core(address(this)));
         address previousCreator = rights.currentCreator;
@@ -77,8 +74,8 @@ library TaxLaunchOperations {
         address token,
         address newCreator,
         address recipient,
-        TaxLaunchValidation validation,
-        TaxLaunchHook hook
+        PlaceLaunchValidation validation,
+        PlaceLaunchHook hook
     ) public {
         validation.validateFeeRecipient(recipient, Core(address(this)));
         address previousCreator = rights.currentCreator;
@@ -91,7 +88,7 @@ library TaxLaunchOperations {
         Core.CreatorRights storage rights,
         address newCreator,
         address recipient,
-        TaxLaunchHook hook
+        PlaceLaunchHook hook
     ) private {
         rights.currentCreator = newCreator;
         rights.creatorFeeRecipient = recipient;
@@ -101,9 +98,9 @@ library TaxLaunchOperations {
 
     function applyTaxPolicy(
         PolicyState storage state,
-        TaxFeeMath.TaxPolicy memory policy,
-        TaxLaunchValidation validation,
-        TaxLaunchHook hook,
+        PlaceFeeMath.TaxPolicy memory policy,
+        PlaceLaunchValidation validation,
+        PlaceLaunchHook hook,
         uint256 supply
     ) public returns (bool) {
         validation.validateTaxPolicy(policy, supply, address(this), hook);
@@ -112,16 +109,16 @@ library TaxLaunchOperations {
 
     function initializeTaxPolicy(
         PolicyState storage state,
-        TaxFeeMath.TaxPolicy memory policy,
-        TaxLaunchValidation validation,
-        TaxLaunchHook hook,
+        PlaceFeeMath.TaxPolicy memory policy,
+        PlaceLaunchValidation validation,
+        PlaceLaunchHook hook,
         uint256 supply
     ) public {
         validation.validateInitialTaxPolicy(policy, supply, address(this), hook);
         _storeTaxPolicy(state, policy);
     }
 
-    function _storeTaxPolicy(PolicyState storage state, TaxFeeMath.TaxPolicy memory policy) private returns (bool) {
+    function _storeTaxPolicy(PolicyState storage state, PlaceFeeMath.TaxPolicy memory policy) private returns (bool) {
         // Validation precedes comparison, including recipient checks for previously valid settings.
         if (keccak256(abi.encode(state.policy)) == keccak256(abi.encode(policy))) return false;
         state.policy = policy;
@@ -132,35 +129,10 @@ library TaxLaunchOperations {
         emit TaxPolicyUpdated(configVersion, state.policy);
     }
 
-    function setDefaultExclusion(
-        address[] storage accounts,
-        mapping(address => uint256) storage indices,
-        address account,
-        bool excluded
-    ) public returns (bool) {
-        if (account == address(0)) revert InvalidConfig();
-        uint256 index = indices[account];
-        if (excluded) {
-            if (index != 0) return false;
-            if (accounts.length == TaxSuiteConstants.MAX_BATCH_SIZE) revert OutOfBounds();
-            accounts.push(account);
-            indices[account] = accounts.length;
-        } else {
-            if (index == 0) return false;
-            address last = accounts[accounts.length - 1];
-            accounts[index - 1] = last;
-            indices[last] = index;
-            accounts.pop();
-            delete indices[account];
-        }
-        return true;
-    }
-
     struct Context {
-        TaxLaunchHook hook;
-        TaxLaunchTokenDeployer tokenDeployer;
-        TaxDividendDeployer dividendDeployer;
-        TaxFeeMath.TaxPolicy admittedPolicy;
+        PlaceLaunchHook hook;
+        PlaceLaunchTokenDeployer tokenDeployer;
+        PlaceFeeMath.TaxPolicy admittedPolicy;
     }
     error InvalidConfig();
     error TokenMismatch();
@@ -171,36 +143,14 @@ library TaxLaunchOperations {
         Context memory context,
         Core.LaunchParams calldata params,
         Core.LaunchPreparation memory preparation,
-        address[] storage defaultExclusions,
+        mapping(address => bool) storage isFactoryToken,
         address originalCreator
     ) public returns (address token, PoolId poolId, PoolKey memory key) {
-        TaxLaunchToken.GenesisParams memory genesis = tokenParams(params, preparation.supply, context.hook);
+        PlaceLaunchToken.GenesisParams memory genesis = tokenParams(params, preparation.supply, context.hook);
         token = context.tokenDeployer.deploy(preparation.scopedSalt, genesis);
         if (token != preparation.predictedToken) revert TokenMismatch();
-        address dividend;
-        if (params.taxConfiguration.dividendAllocationShare != 0) {
-            dividend = context.dividendDeployer.deploy(preparation.scopedSalt);
-            if (dividend == params.creatorFeeRecipient || dividend == params.integratorFeeRecipient) {
-                revert InvalidConfig();
-            }
-            if (dividend == context.admittedPolicy.protocolFeeConfiguration.protocolFeeRecipient) {
-                revert InvalidConfig();
-            }
-            TaxDividend(payable(dividend))
-                .initialize(
-                    TaxDividend.Initialization({
-                    factory: address(this),
-                    taxToken: token,
-                    quoteToken: params.quoteToken,
-                    hook: address(context.hook),
-                    feeEscrow: FeeEscrow(payable(context.hook.feeEscrow())),
-                    minimumDividendHolding: params.taxConfiguration.minimumDividendHolding,
-                    defaultExclusions: defaultExclusions
-                })
-                );
-            TaxLaunchToken(token).initializeDividend(dividend);
-        }
-        TaxLaunchToken asset = TaxLaunchToken(token);
+        isFactoryToken[token] = true;
+        PlaceLaunchToken asset = PlaceLaunchToken(token);
         if (
             asset.factory() != address(this) || asset.totalSupply() != preparation.supply
                 || asset.supplyCap() != preparation.supply || asset.decimals() != 18
@@ -219,12 +169,11 @@ library TaxLaunchOperations {
         if (preparation.tokenIsCurrency0) initialTick -= preparation.spacing;
         if (initialTick < TickMath.MIN_TICK || initialTick > TickMath.MAX_TICK) revert OutOfBounds();
         context.hook.poolManager().initialize(key, TickMath.getSqrtPriceAtTick(initialTick));
-        TaxLaunchHook.PoolRegistration memory registration = TaxLaunchHook.PoolRegistration({
+        PlaceLaunchHook.PoolRegistration memory registration = PlaceLaunchHook.PoolRegistration({
             token: token,
             creator: originalCreator,
             creatorFeeRecipient: params.creatorFeeRecipient,
             integratorFeeRecipient: params.integratorFeeRecipient,
-            dividend: dividend,
             launchTime: uint48(block.timestamp),
             antiSnipeEnabled: params.antiSnipeEnabled,
             admittedPolicy: context.admittedPolicy,
@@ -236,33 +185,32 @@ library TaxLaunchOperations {
     }
 
     function predictTokenAddress(
-        TaxLaunchTokenDeployer deployer,
+        PlaceLaunchTokenDeployer deployer,
         Core.LaunchParams calldata params,
         bytes32 salt,
         uint256 supply,
-        TaxLaunchHook hook
+        PlaceLaunchHook hook
     ) public view returns (address) {
         return deployer.predictTokenAddress(salt, tokenParams(params, supply, hook));
     }
 
     function tokenInitCodeHash(
-        TaxLaunchTokenDeployer deployer,
+        PlaceLaunchTokenDeployer deployer,
         Core.LaunchParams calldata params,
         uint256 supply,
-        TaxLaunchHook hook
+        PlaceLaunchHook hook
     ) public view returns (bytes32) {
         return deployer.tokenInitCodeHash(tokenParams(params, supply, hook));
     }
 
-    function tokenParams(Core.LaunchParams calldata params, uint256 supply, TaxLaunchHook hook)
+    function tokenParams(Core.LaunchParams calldata params, uint256 supply, PlaceLaunchHook hook)
         internal
         view
-        returns (TaxLaunchToken.GenesisParams memory genesis)
+        returns (PlaceLaunchToken.GenesisParams memory genesis)
     {
         address metadataAuthority;
         if (params.metadataEditable) metadataAuthority = address(this);
         genesis.factory = address(this);
-        genesis.dividendsEnabled = params.taxConfiguration.dividendAllocationShare != 0;
         genesis.tokenName = params.tokenName;
         genesis.tokenSymbol = params.tokenSymbol;
         genesis.tokenContractURI = params.tokenContractURI;

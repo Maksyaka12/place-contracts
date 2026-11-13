@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
 
 /// @notice Shared compile-time constants. Contracts expose some of them as public constants.
-library TaxSuiteConstants {
+library PlaceSuiteConstants {
     uint256 internal constant BPS = 10_000;
     uint256 internal constant PERCENTAGE_SCALE = 100_000_000;
     uint256 internal constant RATE_SCALE = 10 ** 24;

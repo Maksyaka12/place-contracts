@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
 
-import {TaxLaunchToken} from "./TaxLaunchToken.sol";
+import {PlaceLaunchToken} from "./PlaceLaunchToken.sol";
 
-interface ITaxLaunchTokenFactory {
+interface IPlaceLaunchTokenFactory {
     function tokenDeployer() external view returns (address);
 }
 
-/// @title TaxLaunchTokenDeployer
+/// @title PlaceLaunchTokenDeployer
 /// @notice One-purpose CREATE2 deployer for tax launch tokens. It keeps the token creation bytecode out of the
 ///         factory, which keeps the factory under the size limit, while token addresses stay deterministic.
-contract TaxLaunchTokenDeployer {
+contract PlaceLaunchTokenDeployer {
     address public immutable factoryInitializer;
     address public factory;
 
@@ -28,11 +29,11 @@ contract TaxLaunchTokenDeployer {
         if (msg.sender != factoryInitializer) revert Unauthorized();
         if (factory != address(0)) revert AlreadyInitialized();
         if (factoryAddress == address(0) || factoryAddress.code.length == 0) revert InvalidConfig();
-        if (ITaxLaunchTokenFactory(factoryAddress).tokenDeployer() != address(this)) revert InvalidConfig();
+        if (IPlaceLaunchTokenFactory(factoryAddress).tokenDeployer() != address(this)) revert InvalidConfig();
         factory = factoryAddress;
     }
 
-    function predictTokenAddress(bytes32 scopedSalt, TaxLaunchToken.GenesisParams calldata genesisParams)
+    function predictTokenAddress(bytes32 scopedSalt, PlaceLaunchToken.GenesisParams calldata genesisParams)
         external
         view
         returns (address predictedToken)
@@ -40,7 +41,7 @@ contract TaxLaunchTokenDeployer {
         return _predictTokenAddress(scopedSalt, genesisParams);
     }
 
-    function tokenInitCodeHash(TaxLaunchToken.GenesisParams calldata genesisParams)
+    function tokenInitCodeHash(PlaceLaunchToken.GenesisParams calldata genesisParams)
         external
         pure
         returns (bytes32 initCodeHash)
@@ -48,7 +49,7 @@ contract TaxLaunchTokenDeployer {
         return _tokenInitCodeHash(genesisParams);
     }
 
-    function deploy(bytes32 scopedSalt, TaxLaunchToken.GenesisParams calldata genesisParams)
+    function deploy(bytes32 scopedSalt, PlaceLaunchToken.GenesisParams calldata genesisParams)
         external
         returns (address token)
     {
@@ -57,10 +58,10 @@ contract TaxLaunchTokenDeployer {
         if (genesisParams.factory != factoryAddress) revert InvalidConfig();
         token = _predictTokenAddress(scopedSalt, genesisParams);
         if (token.code.length != 0) revert TokenAlreadyExists(token);
-        return address(new TaxLaunchToken{salt: scopedSalt}(genesisParams));
+        return address(new PlaceLaunchToken{salt: scopedSalt}(genesisParams));
     }
 
-    function _predictTokenAddress(bytes32 scopedSalt, TaxLaunchToken.GenesisParams calldata genesisParams)
+    function _predictTokenAddress(bytes32 scopedSalt, PlaceLaunchToken.GenesisParams calldata genesisParams)
         internal
         view
         returns (address predictedToken)
@@ -72,11 +73,11 @@ contract TaxLaunchTokenDeployer {
             );
     }
 
-    function _tokenInitCodeHash(TaxLaunchToken.GenesisParams calldata genesisParams)
+    function _tokenInitCodeHash(PlaceLaunchToken.GenesisParams calldata genesisParams)
         internal
         pure
         returns (bytes32 initCodeHash)
     {
-        return keccak256(abi.encodePacked(type(TaxLaunchToken).creationCode, abi.encode(genesisParams)));
+        return keccak256(abi.encodePacked(type(PlaceLaunchToken).creationCode, abi.encode(genesisParams)));
     }
 }

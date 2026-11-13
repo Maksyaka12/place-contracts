@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
-import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
-import {ITaxFeeAdmin} from "./interfaces/ITaxFeeAdmin.sol";
+import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
+import {IPlaceFeeAdmin} from "./interfaces/IPlaceFeeAdmin.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -11,36 +12,34 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {TaxLaunchValidation} from "./TaxLaunchValidation.sol";
+import {PlaceLaunchValidation} from "./PlaceLaunchValidation.sol";
 
-import {TaxLaunchOperations} from "./TaxLaunchOperations.sol";
+import {PlaceLaunchOperations} from "./PlaceLaunchOperations.sol";
 
-import {TaxFeeMath} from "./TaxFeeMath.sol";
-import {TaxDividend} from "./TaxDividend.sol";
-import {TaxLaunchToken} from "./TaxLaunchToken.sol";
+import {PlaceFeeMath} from "./PlaceFeeMath.sol";
 
-import {TaxLaunchHook} from "./TaxLaunchHook.sol";
+import {PlaceLaunchHook} from "./PlaceLaunchHook.sol";
 import {AnnouncementRegistry} from "../AnnouncementRegistry.sol";
 import {ICreatorRightsReceiver} from "../interfaces/ICreatorRightsReceiver.sol";
 import {ILaunchTokenMetadata} from "../interfaces/ILaunchTokenMetadata.sol";
 import {ILaunchBuyAdapter} from "../interfaces/ILaunchBuyAdapter.sol";
 
-/// @title TaxLaunchpadFactoryCore
+/// @title PlaceLaunchFactoryCore
 /// @notice Shared genesis + governance for single-sided Uniswap v4 launchpads. Concrete factories provide the
 ///         token creation primitive while this core keeps quote registry, creator rights, pool creation, seed math,
 ///         locked-liquidity invariants, fee configuration, and event emission consistent across chains.
-abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITaxFeeAdmin {
+abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlaceFeeAdmin {
     /// @notice Sentinel `upperOffset` meaning "extend to the furthest usable tick on the token side".
     int24 internal constant TAIL = type(int24).max;
 
-    uint256 public constant MIN_SUPPLY = TaxSuiteConstants.MIN_SUPPLY;
-    uint256 public constant MAX_SUPPLY = TaxSuiteConstants.MAX_SUPPLY;
-    uint256 public constant PERCENTAGE_SCALE = TaxSuiteConstants.PERCENTAGE_SCALE;
-    uint256 internal constant MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH = TaxSuiteConstants.MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH;
+    uint256 public constant MIN_SUPPLY = PlaceSuiteConstants.MIN_SUPPLY;
+    uint256 public constant MAX_SUPPLY = PlaceSuiteConstants.MAX_SUPPLY;
+    uint256 public constant PERCENTAGE_SCALE = PlaceSuiteConstants.PERCENTAGE_SCALE;
+    uint256 internal constant MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH = PlaceSuiteConstants.MAX_LAUNCH_BUY_ROUTE_DATA_LENGTH;
 
     IPoolManager public immutable poolManager;
-    TaxLaunchHook public immutable hook;
-    TaxLaunchValidation public immutable launchValidation;
+    PlaceLaunchHook public immutable hook;
+    PlaceLaunchValidation public immutable launchValidation;
 
     /// @notice A registered quote. `startTickToken0Frame` is the opening tick assuming the launch token sorts
     ///         as currency0; it is negated at launch when the token is currency1. This single per-quote dial
@@ -64,39 +63,34 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
 
     Band[] internal _bandTemplate;
 
-    address[] internal _defaultDividendExclusions;
-    mapping(address => uint256) private _defaultExclusionIndex;
-    uint256 public constant MAX_DIVIDEND_BATCH_SIZE = TaxSuiteConstants.MAX_BATCH_SIZE;
-    event DefaultDividendExclusionUpdated(address indexed account, bool excluded, uint64 configVersion);
     event LaunchTaxConfigured(
         PoolId indexed poolId,
         address indexed token,
         uint64 indexed configVersion,
-        TaxFeeMath.TaxPolicy admittedPolicy,
-        TaxFeeMath.TaxConfiguration taxConfiguration,
+        PlaceFeeMath.TaxPolicy admittedPolicy,
+        PlaceFeeMath.TaxConfiguration taxConfiguration,
         address integratorFeeRecipient,
         bool antiSnipeEnabled
     );
-    error DividendsDisabled();
     error AntiSnipeUnavailable();
-    // Raised by TaxLaunchValidation and redeclared here so they appear in the factory ABI.
+    // Raised by PlaceLaunchValidation and redeclared here so they appear in the factory ABI.
     error InvalidTaxBounds();
     error InvalidTaxConfiguration();
 
     error InvalidProtocolFeeConfiguration();
     error InvalidMinimumDividendHoldingRequirement();
     error InvalidFeeSchedule();
-    TaxLaunchOperations.PolicyState internal _policyState;
+    PlaceLaunchOperations.PolicyState internal _policyState;
 
-    function taxPolicy() public view override returns (TaxFeeMath.TaxPolicy memory) {
+    function taxPolicy() public view override returns (PlaceFeeMath.TaxPolicy memory) {
         return _policyState.policy;
     }
 
-    function previewTaxConfiguration(TaxFeeMath.TaxConfiguration calldata configuration)
+    function previewTaxConfiguration(PlaceFeeMath.TaxConfiguration calldata configuration)
         external
         view
         override
-        returns (TaxFeeMath.TaxConfigurationPreview memory)
+        returns (PlaceFeeMath.TaxConfigurationPreview memory)
     {
         return launchValidation.previewTaxConfiguration(configuration, _policyState.policy, launchSupply, configVersion);
     }
@@ -120,6 +114,8 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
     address public announcementRegistry;
     uint64 public configVersion = 1;
     mapping(bytes32 scopedSalt => bool used) public isLaunchSaltUsed;
+    /// @notice Place: tokens this factory created (set during the launch, before the hook registers the pool).
+    mapping(address token => bool created) public isFactoryToken;
 
     struct LaunchParams {
         string tokenName;
@@ -132,7 +128,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         bool metadataEditable;
         string[] metadataKeys;
         string[] metadataValues;
-        TaxFeeMath.TaxConfiguration taxConfiguration;
+        PlaceFeeMath.TaxConfiguration taxConfiguration;
         address creatorFeeRecipient;
         address integratorFeeRecipient;
         bool antiSnipeEnabled;
@@ -152,7 +148,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         bool tokenIsCurrency0;
         int24 spacing;
         int24 startTick;
-        TaxLaunchHook.SeedPosition[] seedPositions;
+        PlaceLaunchHook.SeedPosition[] seedPositions;
     }
 
     event QuoteRegistered(address indexed quoteToken, uint8 quoteDecimals, int24 startTickToken0Frame, uint64 revision);
@@ -246,13 +242,13 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
     struct FactoryInitialization {
         uint256 launchSupply;
         int24 tickSpacing;
-        TaxFeeMath.TaxPolicy taxPolicy;
+        PlaceFeeMath.TaxPolicy taxPolicy;
         Band[] bandTemplate;
     }
 
     constructor(
         IPoolManager poolManagerAddress,
-        TaxLaunchHook launchHook,
+        PlaceLaunchHook launchHook,
         FactoryInitialization memory initialFactoryConfiguration
     ) Ownable(msg.sender) {
         if (
@@ -262,14 +258,14 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         ) revert InvalidConfig();
         poolManager = poolManagerAddress;
         hook = launchHook;
-        launchValidation = new TaxLaunchValidation();
+        launchValidation = new PlaceLaunchValidation();
         _setLaunchSupply(initialFactoryConfiguration.launchSupply);
         _applyTickSpacing(initialFactoryConfiguration.tickSpacing);
-        TaxLaunchOperations.initializeTaxPolicy(
+        PlaceLaunchOperations.initializeTaxPolicy(
             _policyState, initialFactoryConfiguration.taxPolicy, launchValidation, hook, launchSupply
         );
         _applyBandTemplate(initialFactoryConfiguration.bandTemplate);
-        TaxLaunchOperations.emitTaxPolicy(_policyState, configVersion);
+        PlaceLaunchOperations.emitTaxPolicy(_policyState, configVersion);
     }
 
     // ============================================================
@@ -396,12 +392,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         preparation.predictedToken = _predictTokenAddress(launchParams, preparation.scopedSalt, preparation.supply);
         _validatePredictedToken(preparation.predictedToken);
         launchValidation.validateLaunchRecipients(
-            this,
-            launchParams.creatorFeeRecipient,
-            launchParams.integratorFeeRecipient,
-            preparation.predictedToken,
-            preparation.scopedSalt,
-            launchParams.taxConfiguration.dividendAllocationShare != 0
+            this, launchParams.creatorFeeRecipient, launchParams.integratorFeeRecipient, preparation.predictedToken
         );
         preparation.tokenIsCurrency0 = uint160(preparation.predictedToken) < uint160(launchParams.quoteToken);
         preparation.spacing = tickSpacing;
@@ -451,7 +442,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
     function _resolveSeedPositions(int24 startTick, int24 spacing, bool tokenIsCurrency0, uint256 supply)
         internal
         view
-        returns (TaxLaunchHook.SeedPosition[] memory)
+        returns (PlaceLaunchHook.SeedPosition[] memory)
     {
         return launchValidation.resolveSeedPositions(_bandTemplate, startTick, spacing, tokenIsCurrency0, supply);
     }
@@ -536,7 +527,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         CreatorRights storage rights = _requireCreatorRights(token);
         _validateCreatorRightsAddress(token, newCreator);
         if (newCreator == rights.currentCreator) revert InvalidConfig();
-        TaxLaunchOperations.reassignCreatorRights(
+        PlaceLaunchOperations.reassignCreatorRights(
             rights, token, newCreator, newCreatorFeeRecipient, launchValidation, hook
         );
     }
@@ -561,11 +552,11 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
     function acceptCreatorRightsTransfer(address token) external nonReentrant {
         CreatorRights storage rights = _requireCreatorRights(token);
         if (msg.sender != rights.pendingCreator || msg.sender == address(0)) revert NotPendingCreator();
-        TaxLaunchOperations.transferCreatorRights(rights, token, msg.sender, launchValidation, hook);
+        PlaceLaunchOperations.transferCreatorRights(rights, token, msg.sender, launchValidation, hook);
     }
 
     function setCreatorFeeRecipient(address token, address newCreatorFeeRecipient) external nonReentrant {
-        TaxLaunchOperations.setCreatorFeeRecipient(
+        PlaceLaunchOperations.setCreatorFeeRecipient(
             _requireCurrentCreator(token), token, newCreatorFeeRecipient, launchValidation, hook
         );
     }
@@ -581,7 +572,7 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
             revert InvalidCreatorRightsReceiver();
         }
         address previousCreator = rights.currentCreator;
-        TaxLaunchOperations.transferCreatorRights(rights, token, rightsReceiver, launchValidation, hook);
+        PlaceLaunchOperations.transferCreatorRights(rights, token, rightsReceiver, launchValidation, hook);
         bytes4 selector = ICreatorRightsReceiver(rightsReceiver).onCreatorRightsReceived{value: msg.value}(
             previousCreator, token, callbackData
         );
@@ -593,11 +584,6 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
     function updateTokenName(address token, string calldata newName) external nonReentrant {
         _requireMetadataEditor(token);
         ILaunchTokenMetadata(token).updateName(newName);
-    }
-
-    function updateTokenSymbol(address token, string calldata newSymbol) external nonReentrant {
-        _requireMetadataEditor(token);
-        ILaunchTokenMetadata(token).updateSymbol(newSymbol);
     }
 
     function updateTokenContractURI(address token, string calldata newContractURI) external nonReentrant {
@@ -632,7 +618,6 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         if (
             account == address(0) || account == token || account == address(this) || account == address(hook)
                 || account == address(poolManager) || account == hook.feeEscrow() || account == announcementRegistry
-                || hook.isDividendContract(account)
         ) revert InvalidConfig();
     }
 
@@ -643,105 +628,48 @@ abstract contract TaxLaunchpadFactoryCore is Ownable2Step, ReentrancyGuard, ITax
         _validateCreatorRightsAddress(address(0), newCreatorAdmin);
     }
 
-    function setTaxPolicy(TaxFeeMath.TaxPolicy calldata policy) external override onlyOwner {
+    function setTaxPolicy(PlaceFeeMath.TaxPolicy calldata policy) external override onlyOwner {
         _applyTaxPolicy(policy);
     }
 
-    function setTaxFeeBounds(TaxFeeMath.TaxFeeBounds calldata bounds) external override onlyOwner {
-        TaxFeeMath.TaxPolicy memory policy = _policyState.policy;
+    function setTaxFeeBounds(PlaceFeeMath.TaxFeeBounds calldata bounds) external override onlyOwner {
+        PlaceFeeMath.TaxPolicy memory policy = _policyState.policy;
         policy.taxFeeBounds = bounds;
         _applyTaxPolicy(policy);
     }
 
-    function setProtocolFeeConfiguration(TaxFeeMath.ProtocolFeeConfiguration calldata configuration)
+    function setProtocolFeeConfiguration(PlaceFeeMath.ProtocolFeeConfiguration calldata configuration)
         external
         override
         onlyOwner
     {
-        TaxFeeMath.TaxPolicy memory policy = _policyState.policy;
+        PlaceFeeMath.TaxPolicy memory policy = _policyState.policy;
         policy.protocolFeeConfiguration = configuration;
         _applyTaxPolicy(policy);
     }
 
-    function setAntiSnipeConfiguration(TaxFeeMath.AntiSnipeConfiguration calldata configuration)
+    function setAntiSnipeConfiguration(PlaceFeeMath.AntiSnipeConfiguration calldata configuration)
         external
         override
         onlyOwner
     {
-        TaxFeeMath.TaxPolicy memory policy = _policyState.policy;
+        PlaceFeeMath.TaxPolicy memory policy = _policyState.policy;
         policy.antiSnipeConfiguration = configuration;
         _applyTaxPolicy(policy);
     }
 
-    function setMinimumDividendHoldingRequirement(uint256 minimumHolding) external override onlyOwner {
-        TaxFeeMath.TaxPolicy memory policy = _policyState.policy;
-        policy.minimumDividendHoldingRequirement = minimumHolding;
-        _applyTaxPolicy(policy);
-    }
-
-    function _applyTaxPolicy(TaxFeeMath.TaxPolicy memory policy) internal {
+    function _applyTaxPolicy(PlaceFeeMath.TaxPolicy memory policy) internal {
         // Policy validation makes only static external calls. Keep no-ops write-free while rejecting
         // policy mutation from an active launch, payout or other guarded factory operation.
         if (_reentrancyGuardEntered()) revert ReentrancyGuardReentrantCall();
-        if (!TaxLaunchOperations.applyTaxPolicy(_policyState, policy, launchValidation, hook, launchSupply)) return;
+        if (!PlaceLaunchOperations.applyTaxPolicy(_policyState, policy, launchValidation, hook, launchSupply)) return;
         _bumpConfigVersion();
-        TaxLaunchOperations.emitTaxPolicy(_policyState, configVersion);
-    }
-
-    function defaultDividendExclusions() external view returns (address[] memory) {
-        return _defaultDividendExclusions;
-    }
-
-    function setDefaultDividendExclusion(address account, bool excluded) external onlyOwner nonReentrant {
-        if (!TaxLaunchOperations.setDefaultExclusion(
-                _defaultDividendExclusions, _defaultExclusionIndex, account, excluded
-            )) return;
-        _bumpConfigVersion();
-        emit DefaultDividendExclusionUpdated(account, excluded, configVersion);
-    }
-
-    function dividendOf(address token) public view returns (address) {
-        _requireCreatorRights(token);
-        return TaxLaunchToken(token).dividend();
-    }
-
-    function setLaunchDividendExclusions(address token, address[] calldata accounts, bool excluded)
-        external
-        nonReentrant
-    {
-        TaxDividend dividend = _requireDividendAdmin(token);
-        if (accounts.length == 0 || accounts.length > MAX_DIVIDEND_BATCH_SIZE) revert OutOfBounds();
-        for (uint256 i; i < accounts.length; ++i) {
-            if (excluded) dividend.excludeAddress(accounts[i]);
-            else dividend.unexcludeAddress(accounts[i]);
-        }
-    }
-
-    function setLaunchDividendReceiver(address token, address holder, address receiver) external nonReentrant {
-        _requireDividendAdmin(token).setDividendReceiver(holder, receiver);
-    }
-
-    function refreshLaunchDividendShares(address token, address[] calldata holders) external nonReentrant {
-        _requireDividendAdmin(token).refreshShares(holders);
-    }
-
-    function emergencyWithdrawDividendAssets(address token, address asset, uint256 amount, address recipient)
-        external
-        nonReentrant
-    {
-        _requireDividendAdmin(token).emergencyWithdraw(asset, amount, recipient);
-    }
-
-    function _requireDividendAdmin(address token) internal view returns (TaxDividend) {
-        _requireOwnerOrCreatorAdmin();
-        address dividend = dividendOf(token);
-        if (dividend == address(0)) revert DividendsDisabled();
-        return TaxDividend(payable(dividend));
+        PlaceLaunchOperations.emitTaxPolicy(_policyState, configVersion);
     }
 
     function adminSetCreatorFeeRecipient(address token, address recipient) external nonReentrant {
         _requireOwnerOrCreatorAdmin();
-        TaxLaunchOperations.setCreatorFeeRecipient(
+        PlaceLaunchOperations.setCreatorFeeRecipient(
             _requireCreatorRights(token), token, recipient, launchValidation, hook
         );
     }

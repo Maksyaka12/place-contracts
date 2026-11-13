@@ -2,9 +2,8 @@
 pragma solidity 0.8.26;
 
 // Place Launch L0: B20 precompile and Uniswap v4 checks. Fork-only (the B20 feature is not
-// activated in a plain local EVM):
-//   forge test --match-path test/fork/B20Fork.t.sol \
-//     --fork-url https://base-sepolia-rpc.publicnode.com --hardfork base:Cobalt -vv
+// activated in a plain local EVM). setUp forks Base Sepolia (BASE_SEPOLIA_RPC_URL, else publicnode):
+//   forge test --match-path test/fork/B20Fork.t.sol -vv
 
 import {Test, console} from "forge-std/Test.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
@@ -59,6 +58,10 @@ interface IB20 {
 
 contract B20ForkTest is Test, IUnlockCallback {
     using CurrencySettler for Currency;
+
+    function setUp() public {
+        vm.createSelectFork(vm.envOr("BASE_SEPOLIA_RPC_URL", string("https://base-sepolia-rpc.publicnode.com")));
+    }
 
     IB20Factory constant FACTORY = IB20Factory(0xB20f000000000000000000000000000000000000);
     IPoolManager constant PM = IPoolManager(0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408); // Base Sepolia v4

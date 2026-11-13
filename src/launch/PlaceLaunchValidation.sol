@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
-import {TaxLaunchOperations} from "./TaxLaunchOperations.sol";
-import {ITaxDividendClaimHelper} from "./interfaces/ITaxDividendClaimHelper.sol";
-import {TaxSuiteConstants} from "./TaxSuiteConstants.sol";
-import {TaxLaunchpadFactoryCore} from "./TaxLaunchpadFactoryCore.sol";
-import {TaxLaunchHook} from "./TaxLaunchHook.sol";
-import {ITaxLaunchTokenFactory} from "./TaxLaunchTokenDeployer.sol";
-import {ITaxDividendFactory, TaxDividendDeployer} from "./TaxDividendDeployer.sol";
-import {TaxFeeMath} from "./TaxFeeMath.sol";
+import {PlaceLaunchOperations} from "./PlaceLaunchOperations.sol";
+import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
+import {PlaceLaunchFactoryCore} from "./PlaceLaunchFactoryCore.sol";
+import {PlaceLaunchHook} from "./PlaceLaunchHook.sol";
+import {IPlaceLaunchTokenFactory} from "./PlaceLaunchTokenDeployer.sol";
+import {PlaceFeeMath} from "./PlaceFeeMath.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {AnnouncementRegistry} from "../AnnouncementRegistry.sol";
 import {ILaunchBuyAdapter} from "../interfaces/ILaunchBuyAdapter.sol";
 
 /// @notice Stateless validation and genesis calculations, with no asset forwarding or recovery functionality.
-contract TaxLaunchValidation {
-    uint256 private constant BPS = TaxSuiteConstants.BPS;
+contract PlaceLaunchValidation {
+    uint256 private constant BPS = PlaceSuiteConstants.BPS;
     int24 private constant TAIL = type(int24).max;
-    uint256 private constant MAX_BANDS = TaxSuiteConstants.MAX_BANDS;
+    uint256 private constant MAX_BANDS = PlaceSuiteConstants.MAX_BANDS;
     error InvalidConfig();
     error OutOfBounds();
     error MisalignedOffset();
@@ -25,11 +24,8 @@ contract TaxLaunchValidation {
 
     struct RecipientContext {
         address factory;
-        TaxLaunchHook hook;
+        PlaceLaunchHook hook;
         address tokenDeployer;
-        address dividendDeployer;
-        address dividendImplementation;
-        address dividendClaimHelper;
         address announcementRegistry;
         address launchBuyAdapter;
         address launchBuyRouter;
@@ -37,32 +33,26 @@ contract TaxLaunchValidation {
         bool checkLaunchRecords;
     }
 
-    function validateFeeRecipient(address recipient, TaxLaunchpadFactoryCore factory) external view {
+    function validateFeeRecipient(address recipient, PlaceLaunchFactoryCore factory) external view {
         _validateRecipient(recipient, _recipientContext(factory, factory.hook()));
     }
 
     function validateLaunchRecipients(
-        TaxLaunchpadFactoryCore factory,
+        PlaceLaunchFactoryCore factory,
         address creatorFeeRecipient,
         address integratorFeeRecipient,
-        address predictedToken,
-        bytes32 scopedSalt,
-        bool dividendsEnabled
+        address predictedToken
     ) external view {
         RecipientContext memory context = _recipientContext(factory, factory.hook());
-        address predictedDividend;
-        if (dividendsEnabled) {
-            predictedDividend = TaxDividendDeployer(context.dividendDeployer).predictDividendAddress(scopedSalt);
-        }
-        _validateLaunchRecipient(creatorFeeRecipient, context, predictedToken, predictedDividend);
+        _validateLaunchRecipient(creatorFeeRecipient, context, predictedToken);
         if (integratorFeeRecipient != address(0)) {
-            _validateLaunchRecipient(integratorFeeRecipient, context, predictedToken, predictedDividend);
+            _validateLaunchRecipient(integratorFeeRecipient, context, predictedToken);
         }
-        _validateConfiguredRecipients(factory, context, predictedToken, predictedDividend);
+        _validateConfiguredRecipients(factory, context, predictedToken);
     }
 
-    function validateFactoryWiring(TaxLaunchpadFactoryCore factory) external view {
-        TaxLaunchHook hook = factory.hook();
+    function validateFactoryWiring(PlaceLaunchFactoryCore factory) external view {
+        PlaceLaunchHook hook = factory.hook();
         address registry = factory.announcementRegistry();
         address escrow = hook.feeEscrow();
         if (
@@ -71,58 +61,52 @@ contract TaxLaunchValidation {
                 || hook.factory() != address(factory) || escrow == address(0) || escrow.code.length == 0
         ) revert InvalidConfig();
         RecipientContext memory context = _recipientContext(factory, hook);
-        if (ITaxDividendClaimHelper(context.dividendClaimHelper).factory() != address(factory)) revert InvalidConfig();
-        _validateConfiguredRecipients(factory, context, address(0), address(0));
+        _validateConfiguredRecipients(factory, context, address(0));
     }
 
     /// @dev Called from the factory constructor, before its getters exist, so bindings are passed explicitly.
     function validateInitialDeploymentRecipients(
         address protocolFeeRecipient,
         address factory,
-        TaxLaunchHook hook,
-        address tokenDeployer,
-        TaxDividendDeployer dividendDeployer
+        PlaceLaunchHook hook,
+        address tokenDeployer
     ) external view {
         RecipientContext memory context = _initialRecipientContext(factory, hook);
         context.tokenDeployer = tokenDeployer;
-        context.dividendDeployer = address(dividendDeployer);
-        context.dividendImplementation = address(dividendDeployer.implementation());
-        context.dividendClaimHelper = dividendDeployer.implementation().claimHelper();
-        if (ITaxDividendClaimHelper(context.dividendClaimHelper).hook() != address(hook)) revert InvalidConfig();
         _validateRecipient(protocolFeeRecipient, context);
     }
 
     function validateLaunchTax(
-        TaxFeeMath.TaxConfiguration calldata tax,
-        TaxFeeMath.TaxPolicy calldata policy,
+        PlaceFeeMath.TaxConfiguration calldata tax,
+        PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
         bool antiSnipeEnabled
     ) external pure {
-        TaxFeeMath.validateTax(tax, policy, supply);
+        PlaceFeeMath.validateTax(tax, policy, supply);
         if (antiSnipeEnabled && policy.antiSnipeConfiguration.windowSeconds == 0) revert AntiSnipeUnavailable();
     }
 
     function previewTaxConfiguration(
-        TaxFeeMath.TaxConfiguration calldata tax,
-        TaxFeeMath.TaxPolicy calldata policy,
+        PlaceFeeMath.TaxConfiguration calldata tax,
+        PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
         uint64 configVersion
-    ) external pure returns (TaxFeeMath.TaxConfigurationPreview memory preview) {
-        preview.dividendsEnabled = TaxFeeMath.validateTax(tax, policy, supply);
+    ) external pure returns (PlaceFeeMath.TaxConfigurationPreview memory preview) {
+        preview.dividendsEnabled = PlaceFeeMath.validateTax(tax, policy, supply);
         preview.configVersion = configVersion;
         preview.minimumDividendHoldingRequirement = policy.minimumDividendHoldingRequirement;
-        preview.buyRates = TaxFeeMath.rates(tax.buyTaxRate, policy.protocolFeeConfiguration, tax, 0);
-        preview.sellRates = TaxFeeMath.rates(tax.sellTaxRate, policy.protocolFeeConfiguration, tax, 0);
+        preview.buyRates = PlaceFeeMath.rates(tax.buyTaxRate, policy.protocolFeeConfiguration, tax, 0);
+        preview.sellRates = PlaceFeeMath.rates(tax.sellTaxRate, policy.protocolFeeConfiguration, tax, 0);
     }
 
     function resolveSeedPositions(
-        TaxLaunchpadFactoryCore.Band[] memory tmpl,
+        PlaceLaunchFactoryCore.Band[] memory tmpl,
         int24 startTick,
         int24 spacing,
         bool tokenIsCurrency0,
         uint256 supply
-    ) external pure returns (TaxLaunchHook.SeedPosition[] memory positions) {
-        positions = new TaxLaunchHook.SeedPosition[](tmpl.length);
+    ) external pure returns (PlaceLaunchHook.SeedPosition[] memory positions) {
+        positions = new PlaceLaunchHook.SeedPosition[](tmpl.length);
         // forge-lint: disable-next-line(divide-before-multiply) the truncation IS the alignment
         int24 maxUsable = (TickMath.MAX_TICK / spacing) * spacing;
         // forge-lint: disable-next-line(divide-before-multiply) the truncation IS the alignment
@@ -152,11 +136,11 @@ contract TaxLaunchValidation {
             if (liquidity == 0 || liquidity >= uint128(type(int128).max)) revert OutOfBounds();
 
             positions[i] =
-                TaxLaunchHook.SeedPosition({tickLower: tickLower, tickUpper: tickUpper, liquidity: liquidity});
+                PlaceLaunchHook.SeedPosition({tickLower: tickLower, tickUpper: tickUpper, liquidity: liquidity});
         }
     }
 
-    function validateBandTemplate(TaxLaunchpadFactoryCore.Band[] memory newBands, int24 spacing) external pure {
+    function validateBandTemplate(PlaceLaunchFactoryCore.Band[] memory newBands, int24 spacing) external pure {
         if (newBands.length == 0 || newBands.length > MAX_BANDS) revert OutOfBounds();
         if (newBands[0].lowerOffset != 0) revert InvalidConfig();
         uint256 totalBps;
@@ -177,32 +161,32 @@ contract TaxLaunchValidation {
     }
 
     function validateTaxPolicy(
-        TaxFeeMath.TaxPolicy calldata policy,
+        PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
         address factory,
-        TaxLaunchHook hook
+        PlaceLaunchHook hook
     ) external view {
-        TaxFeeMath.validatePolicy(policy, supply);
+        PlaceFeeMath.validatePolicy(policy, supply);
         _validateRecipient(
             policy.protocolFeeConfiguration.protocolFeeRecipient,
-            _recipientContext(TaxLaunchpadFactoryCore(factory), hook)
+            _recipientContext(PlaceLaunchFactoryCore(factory), hook)
         );
     }
 
     /// @dev Called from the factory constructor, before its getters exist, so bindings are passed explicitly.
     function validateInitialTaxPolicy(
-        TaxFeeMath.TaxPolicy calldata policy,
+        PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
         address factory,
-        TaxLaunchHook hook
+        PlaceLaunchHook hook
     ) external view {
-        TaxFeeMath.validatePolicy(policy, supply);
+        PlaceFeeMath.validatePolicy(policy, supply);
         _validateRecipient(
             policy.protocolFeeConfiguration.protocolFeeRecipient, _initialRecipientContext(factory, hook)
         );
     }
 
-    function _initialRecipientContext(address factory, TaxLaunchHook hook)
+    function _initialRecipientContext(address factory, PlaceLaunchHook hook)
         private
         view
         returns (RecipientContext memory context)
@@ -222,59 +206,48 @@ contract TaxLaunchValidation {
         }
     }
 
-    function _recipientContext(TaxLaunchpadFactoryCore factory, TaxLaunchHook hook)
+    function _recipientContext(PlaceLaunchFactoryCore factory, PlaceLaunchHook hook)
         private
         view
         returns (RecipientContext memory context)
     {
         context = _initialRecipientContext(address(factory), hook);
-        context.tokenDeployer = ITaxLaunchTokenFactory(address(factory)).tokenDeployer();
-        context.dividendDeployer = ITaxDividendFactory(address(factory)).dividendDeployer();
-        context.dividendImplementation = address(TaxDividendDeployer(context.dividendDeployer).implementation());
-        context.dividendClaimHelper = TaxDividendDeployer(context.dividendDeployer).implementation().claimHelper();
+        context.tokenDeployer = IPlaceLaunchTokenFactory(address(factory)).tokenDeployer();
         context.announcementRegistry = factory.announcementRegistry();
         context.checkLaunchRecords = true;
     }
 
     function _validateConfiguredRecipients(
-        TaxLaunchpadFactoryCore factory,
+        PlaceLaunchFactoryCore factory,
         RecipientContext memory context,
-        address predictedToken,
-        address predictedDividend
+        address predictedToken
     ) private view {
         _validateLaunchRecipient(
-            factory.taxPolicy().protocolFeeConfiguration.protocolFeeRecipient,
-            context,
-            predictedToken,
-            predictedDividend
+            factory.taxPolicy().protocolFeeConfiguration.protocolFeeRecipient, context, predictedToken
         );
     }
 
-    function _validateLaunchRecipient(
-        address recipient,
-        RecipientContext memory context,
-        address predictedToken,
-        address predictedDividend
-    ) private view {
-        if (recipient == predictedToken || recipient == predictedDividend) {
+    function _validateLaunchRecipient(address recipient, RecipientContext memory context, address predictedToken)
+        private
+        view
+    {
+        if (recipient == predictedToken) {
             revert InvalidConfig();
         }
         _validateRecipient(recipient, context);
     }
 
     function _validateRecipient(address recipient, RecipientContext memory context) private view {
-        TaxLaunchHook hook = context.hook;
+        PlaceLaunchHook hook = context.hook;
         if (
             recipient == address(0) || recipient == context.factory || recipient == address(hook)
                 || recipient == address(hook.poolManager()) || recipient == hook.feeEscrow()
-                || hook.isDividendContract(recipient) || recipient == address(this)
-                || recipient == address(TaxLaunchOperations) || recipient == context.tokenDeployer
-                || recipient == context.dividendDeployer || recipient == context.dividendImplementation
-                || recipient == context.dividendClaimHelper || recipient == context.announcementRegistry
+                || recipient == address(this) || recipient == address(PlaceLaunchOperations)
+                || recipient == context.tokenDeployer || recipient == context.announcementRegistry
                 || recipient == context.launchBuyAdapter || recipient == context.launchBuyRouter
                 || recipient == context.launchBuySwapCaller
         ) revert InvalidConfig();
-        if (context.checkLaunchRecords && TaxLaunchpadFactoryCore(context.factory).isLaunchToken(recipient)) {
+        if (context.checkLaunchRecords && PlaceLaunchFactoryCore(context.factory).isLaunchToken(recipient)) {
             revert InvalidConfig();
         }
     }

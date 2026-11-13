@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: MIT
+// Based on o1 (github.com/o1exchange/o1-launch-contracts, MIT, commit 3a49099); modified by Place.
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {ITaxDividend} from "./interfaces/ITaxDividend.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
-/// @title TaxLaunchToken
-/// @notice Fixed-supply ERC20 for tax suite launches, with an optional permanent dividend binding. The constructor
+/// @title PlaceLaunchToken
+/// @notice Fixed-supply ERC20 for Place launches (the ERC-20 option next to B20). The ticker never changes. The constructor
 ///         mints the whole supply once, to a recipient the factory chooses. There is no owner, minter, burner,
 ///         pauser, upgrade hook or admin.
-contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
+contract PlaceLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
     struct GenesisParams {
         address factory;
-        bool dividendsEnabled;
         string tokenName;
         string tokenSymbol;
         string tokenContractURI;
@@ -30,9 +29,6 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
     uint8 public constant decimals = 18;
 
     address public immutable factory;
-    address public dividend;
-    bool public immutable dividendsEnabled;
-    address private immutable _genesisRecipient;
     address public immutable metadataAuthority;
     uint256 public immutable supplyCap;
 
@@ -44,11 +40,8 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
     mapping(address owner => mapping(address spender => uint256 amount)) private _allowances;
     mapping(string metadataKey => string metadataValue) public extraMetadata;
 
-    event DividendInitialized(address indexed dividendContract);
-
     event ContractURIUpdated(address indexed updater, string newContractURI);
     event NameUpdated(address indexed updater, string newName);
-    event SymbolUpdated(address indexed updater, string newSymbol);
     event ExtraMetadataUpdated(address indexed updater, string metadataKey, string metadataValue);
 
     error InvalidConfig();
@@ -63,8 +56,6 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
         ) revert InvalidConfig();
 
         factory = genesisParams.factory;
-        dividendsEnabled = genesisParams.dividendsEnabled;
-        _genesisRecipient = genesisParams.initialRecipient;
         metadataAuthority = genesisParams.metadataAuthority;
         _name = genesisParams.tokenName;
         _symbol = genesisParams.tokenSymbol;
@@ -84,20 +75,6 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
 
     function name() external view returns (string memory) {
         return _name;
-    }
-
-    /// @dev Factory-only, during the launch transaction and before any token moves. A token launched without
-    ///      dividends can never attach a tracker.
-    function initializeDividend(address dividendContract) external {
-        if (msg.sender != factory || !dividendsEnabled || dividend != address(0) || dividendContract.code.length == 0) {
-            revert InvalidConfig();
-        }
-        ITaxDividend tracker = ITaxDividend(dividendContract);
-        if (tracker.taxToken() != address(this) || tracker.owner() != factory || tracker.hook() != _genesisRecipient) {
-            revert InvalidConfig();
-        }
-        dividend = dividendContract;
-        emit DividendInitialized(dividendContract);
     }
 
     function symbol() external view returns (string memory) {
@@ -144,12 +121,6 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
         emit NameUpdated(msg.sender, newName);
     }
 
-    function updateSymbol(string calldata newSymbol) external onlyMetadata {
-        if (bytes(newSymbol).length == 0) revert InvalidConfig();
-        _symbol = newSymbol;
-        emit SymbolUpdated(msg.sender, newSymbol);
-    }
-
     function updateContractURI(string calldata newContractURI) external onlyMetadata {
         contractURI = newContractURI;
         emit ContractURIUpdated(msg.sender, newContractURI);
@@ -171,7 +142,6 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
     }
 
     function _transfer(address from, address to, uint256 amount) internal {
-        if (dividendsEnabled && dividend == address(0)) revert InvalidConfig();
         if (from == address(0)) revert ERC20InvalidSender(address(0));
         if (to == address(0)) revert ERC20InvalidReceiver(address(0));
         uint256 bal = _balances[from];
@@ -181,11 +151,6 @@ contract TaxLaunchToken is IERC20, IERC20Metadata, IERC20Errors {
             _balances[to] += amount;
         }
         emit Transfer(from, to, amount);
-        address tracker = dividend;
-        if (tracker != address(0)) {
-            ITaxDividend(tracker).setShare(from, _balances[from]);
-            if (to != from) ITaxDividend(tracker).setShare(to, _balances[to]);
-        }
     }
 
     function _approve(address owner, address spender, uint256 amount) internal {
