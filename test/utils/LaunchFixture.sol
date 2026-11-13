@@ -19,6 +19,7 @@ import {PlaceLaunchFactoryCore} from "../../src/launch/PlaceLaunchFactoryCore.so
 import {PlaceLaunchTokenDeployer} from "../../src/launch/PlaceLaunchTokenDeployer.sol";
 import {FeeEscrow} from "../../src/FeeEscrow.sol";
 import {AnnouncementRegistry} from "../../src/AnnouncementRegistry.sol";
+import {PlaceCreatorVault} from "../../src/place/PlaceCreatorVault.sol";
 
 /// @notice Deploys a full Place Launch suite (hook at a flag-mined address, factory, escrow, registry) on the
 ///         current chain: a fresh local PoolManager, or the real one on a fork.
@@ -56,7 +57,11 @@ abstract contract LaunchFixture is Test {
             hook,
             tokenDeployer,
             PlaceLaunchFactoryCore.FactoryInitialization({
-                launchSupply: SUPPLY, tickSpacing: SPACING, protocolFeeRecipient: PLATFORM, bandTemplate: bands
+                launchSupply: SUPPLY,
+                tickSpacing: SPACING,
+                protocolFeeRecipient: PLATFORM,
+                bandTemplate: bands,
+                creatorVaultImplementation: address(new PlaceCreatorVault())
             })
         );
         escrow = new FeeEscrow(pm, address(hook));
@@ -86,7 +91,6 @@ abstract contract LaunchFixture is Test {
         p.metadataValues = new string[](1);
         p.metadataKeys[0] = "website";
         p.metadataValues[0] = "https://place.example";
-        p.creatorFeeRecipient = CREATOR;
     }
 
     /// @dev Mines `creatorSalt` until the predicted token address ends in the factory's 0x01 suffix.
@@ -109,6 +113,10 @@ abstract contract LaunchFixture is Test {
         vm.deal(CREATOR, CREATOR.balance + fee);
         vm.prank(CREATOR);
         (token, poolId) = factory.createLaunch{value: fee}(p);
+    }
+
+    function _vault(address token) internal view returns (PlaceCreatorVault) {
+        return PlaceCreatorVault(payable(factory.creatorRights(token).creatorFeeRecipient));
     }
 
     function _poolKey(address token, address quote) internal view returns (PoolKey memory key) {

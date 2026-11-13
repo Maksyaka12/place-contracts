@@ -10,6 +10,8 @@ import {PlaceLaunchToken} from "./PlaceLaunchToken.sol";
 import {PlaceLaunchTokenDeployer} from "./PlaceLaunchTokenDeployer.sol";
 import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
 import {IB20, IB20Factory} from "./interfaces/IB20.sol";
+import {PlaceCreatorVault} from "../place/PlaceCreatorVault.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
@@ -23,9 +25,6 @@ library PlaceLaunchOperations {
         PlaceFeeMath.TaxPolicy policy;
     }
     event TaxPolicyUpdated(uint64 indexed configVersion, PlaceFeeMath.TaxPolicy policy);
-    event CreatorFeeRecipientUpdated(
-        address indexed token, address indexed previousCreatorFeeRecipient, address indexed newCreatorFeeRecipient
-    );
     event CreatorRightsTransferred(
         address indexed token,
         address indexed previousCreator,
@@ -42,21 +41,6 @@ library PlaceLaunchOperations {
         address performedBy
     );
 
-    function setCreatorFeeRecipient(
-        Core.CreatorRights storage rights,
-        address token,
-        address recipient,
-        PlaceLaunchValidation validation,
-        PlaceLaunchHook hook
-    ) public {
-        validation.validateFeeRecipient(recipient, Core(address(this)));
-        address previousRecipient = rights.creatorFeeRecipient;
-        if (previousRecipient == recipient) return;
-        rights.creatorFeeRecipient = recipient;
-        hook.updateCreatorRights(rights.poolId, rights.currentCreator, recipient);
-        emit CreatorFeeRecipientUpdated(token, previousRecipient, recipient);
-    }
-
     function transferCreatorRights(
         Core.CreatorRights storage rights,
         address token,
@@ -67,35 +51,31 @@ library PlaceLaunchOperations {
         validation.validateFeeRecipient(newCreator, Core(address(this)));
         address previousCreator = rights.currentCreator;
         address previousRecipient = rights.creatorFeeRecipient;
-        _applyCreatorRightsTransition(rights, newCreator, newCreator, hook);
-        emit CreatorRightsTransferred(token, previousCreator, newCreator, previousRecipient, newCreator);
+        _applyCreatorRightsTransition(rights, newCreator, hook);
+        emit CreatorRightsTransferred(token, previousCreator, newCreator, previousRecipient, previousRecipient);
     }
 
     function reassignCreatorRights(
         Core.CreatorRights storage rights,
         address token,
         address newCreator,
-        address recipient,
         PlaceLaunchValidation validation,
         PlaceLaunchHook hook
     ) public {
-        validation.validateFeeRecipient(recipient, Core(address(this)));
+        validation.validateFeeRecipient(newCreator, Core(address(this)));
         address previousCreator = rights.currentCreator;
-        address previousRecipient = rights.creatorFeeRecipient;
-        _applyCreatorRightsTransition(rights, newCreator, recipient, hook);
-        emit CreatorRightsReassigned(token, previousCreator, newCreator, previousRecipient, recipient, msg.sender);
+        address recipient = rights.creatorFeeRecipient;
+        _applyCreatorRightsTransition(rights, newCreator, hook);
+        emit CreatorRightsReassigned(token, previousCreator, newCreator, recipient, recipient, msg.sender);
     }
 
-    function _applyCreatorRightsTransition(
-        Core.CreatorRights storage rights,
-        address newCreator,
-        address recipient,
-        PlaceLaunchHook hook
-    ) private {
+    /// @dev Place: the creator fee recipient (the launch's vault) stays; only the creator moves.
+    function _applyCreatorRightsTransition(Core.CreatorRights storage rights, address newCreator, PlaceLaunchHook hook)
+        private
+    {
         rights.currentCreator = newCreator;
-        rights.creatorFeeRecipient = recipient;
         rights.pendingCreator = address(0);
-        hook.updateCreatorRights(rights.poolId, newCreator, recipient);
+        hook.updateCreatorRights(rights.poolId, newCreator, rights.creatorFeeRecipient);
     }
 
     function applyTaxPolicy(
@@ -136,7 +116,15 @@ library PlaceLaunchOperations {
         PlaceLaunchTokenDeployer tokenDeployer;
         PlaceFeeMath.TaxPolicy admittedPolicy;
         PlaceFeeMath.TaxConfiguration taxConfiguration;
+        address vaultImplementation;
+        Core.VaultSettings vaultSettings;
+        uint256 rewardsMinimum;
     }
+
+    event CreatorVaultCreated(
+        address indexed token, address indexed vault, uint16 buybackBps, bool buybackBurn, uint16 rewardsBps
+    );
+
     error InvalidConfig();
     error TokenMismatch();
     error NotImmutable();
@@ -176,10 +164,11 @@ library PlaceLaunchOperations {
         if (preparation.tokenIsCurrency0) initialTick -= preparation.spacing;
         if (initialTick < TickMath.MIN_TICK || initialTick > TickMath.MAX_TICK) revert OutOfBounds();
         context.hook.poolManager().initialize(key, TickMath.getSqrtPriceAtTick(initialTick));
+        _createVault(context, params.economics, preparation, token, key);
         PlaceLaunchHook.PoolRegistration memory registration = PlaceLaunchHook.PoolRegistration({
             token: token,
             creator: originalCreator,
-            creatorFeeRecipient: params.creatorFeeRecipient,
+            creatorFeeRecipient: preparation.vault,
             integratorFeeRecipient: address(0),
             launchTime: uint48(block.timestamp),
             antiSnipeEnabled: true,
@@ -203,6 +192,42 @@ library PlaceLaunchOperations {
                 .getB20Address(PlaceSuiteConstants.B20_ASSET_VARIANT, address(this), salt);
         }
         return deployer.predictTokenAddress(salt, tokenParams(params, supply, hook));
+    }
+
+    // ---- Place: creator vault (LAUNCH.md §7.3, §7.6) ----
+
+    /// @notice Clones and initializes the launch's PlaceCreatorVault at the address `_prepareLaunch` predicted
+    ///         (and validated as the creator fee recipient). The vault validates the economics itself.
+    function _createVault(
+        Context memory context,
+        Core.Economics calldata economics,
+        Core.LaunchPreparation memory preparation,
+        address token,
+        PoolKey memory key
+    ) private {
+        address vault = Clones.cloneDeterministic(context.vaultImplementation, preparation.scopedSalt);
+        if (vault != preparation.vault) revert InvalidConfig();
+        PlaceCreatorVault(payable(vault))
+            .initialize(
+                PlaceCreatorVault.Initialization({
+                    token: token,
+                    poolKey: key,
+                    feeEscrow: context.hook.feeEscrow(),
+                    buybackBps: economics.buybackBps,
+                    buybackBurn: economics.buybackBurn,
+                    rewardsBps: economics.rewardsBps,
+                    xShares: economics.xShares,
+                    xRegistry: context.vaultSettings.xRegistry,
+                    rewards: PlaceCreatorVault.RewardsConfig({
+                        hub: context.vaultSettings.hub,
+                        minAmount: context.rewardsMinimum,
+                        interval: context.vaultSettings.campaignInterval,
+                        rulesHash: context.vaultSettings.rulesHash,
+                        rulesURI: context.vaultSettings.rulesURI
+                    })
+                })
+            );
+        emit CreatorVaultCreated(token, vault, economics.buybackBps, economics.buybackBurn, economics.rewardsBps);
     }
 
     // ---- Place: B20 genesis (LAUNCH.md §8.4) ----

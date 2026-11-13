@@ -30,18 +30,18 @@ contract LaunchERC20Test is LaunchFixture {
         vm.warp(block.timestamp + 21);
         _swap(TRADER, key, token, true, 1 ether);
         assertEq(escrow.owed(PLATFORM, address(0)), 0.0025 ether, "platform 0.25%");
-        assertEq(escrow.owed(CREATOR, address(0)), 0.0075 ether, "creator 0.75%");
+        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.0075 ether, "creator 0.75%");
         uint256 bought = IERC20(token).balanceOf(TRADER);
         assertGt(bought, 0);
         _swap(TRADER, key, token, false, bought);
-        assertGt(escrow.owed(CREATOR, address(0)), 0.0075 ether, "sell fee in ETH too");
+        assertGt(escrow.owed(address(_vault(token)), address(0)), 0.0075 ether, "sell fee in ETH too");
     }
 
     function test_antiSnipe_surchargeToPlatform() public {
         (address token,) = _launch(_params(PlaceLaunchFactoryCore.TokenKind.ERC20, address(0)));
         PoolKey memory key = _poolKey(token, address(0));
         _swap(TRADER, key, token, true, 1 ether); // same block as launch: 99%
-        assertEq(escrow.owed(CREATOR, address(0)), 0.0075 ether, "creator still gets 0.75% only");
+        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.0075 ether, "creator still gets 0.75% only");
         assertEq(escrow.owed(PLATFORM, address(0)), 0.99 ether - 0.0075 ether, "the rest of 99% to the platform");
     }
 

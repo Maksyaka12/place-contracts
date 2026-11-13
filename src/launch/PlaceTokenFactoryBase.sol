@@ -54,7 +54,15 @@ abstract contract PlaceTokenFactoryBase is PlaceLaunchFactoryCore {
         returns (address token, PoolId poolId, PoolKey memory key)
     {
         return PlaceLaunchOperations.create(
-            PlaceLaunchOperations.Context(hook, tokenDeployer, _policyState.policy, placeTaxConfiguration()),
+            PlaceLaunchOperations.Context({
+                hook: hook,
+                tokenDeployer: tokenDeployer,
+                admittedPolicy: _policyState.policy,
+                taxConfiguration: placeTaxConfiguration(),
+                vaultImplementation: creatorVaultImplementation,
+                vaultSettings: _vaultSettings,
+                rewardsMinimum: rewardsMinimum[params.quoteToken]
+            }),
             params,
             preparation,
             launchTokenKind,

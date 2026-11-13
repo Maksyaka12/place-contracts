@@ -250,6 +250,8 @@ contract PlaceLaunchHook is BaseHook, Initializable {
         PoolConfig storage configuration = poolConfig[poolId];
         if (!configuration.initialized) revert InvalidFeeConfig();
         if (newCreator == address(0) || newCreatorFeeRecipient == address(0)) revert InvalidFeeConfig();
+        // Place: the creator fee recipient (the launch's PlaceCreatorVault) is fixed at registration.
+        if (newCreatorFeeRecipient != configuration.creatorFeeRecipient) revert InvalidFeeConfig();
         address previousCreator = configuration.currentCreator;
         address previousCreatorFeeRecipient = configuration.creatorFeeRecipient;
         configuration.currentCreator = newCreator;

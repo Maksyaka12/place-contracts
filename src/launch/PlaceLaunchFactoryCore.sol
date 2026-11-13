@@ -23,6 +23,8 @@ import {AnnouncementRegistry} from "../AnnouncementRegistry.sol";
 import {ICreatorRightsReceiver} from "../interfaces/ICreatorRightsReceiver.sol";
 import {ILaunchTokenMetadata} from "../interfaces/ILaunchTokenMetadata.sol";
 import {ILaunchBuyAdapter} from "../interfaces/ILaunchBuyAdapter.sol";
+import {PlaceCreatorVault} from "../place/PlaceCreatorVault.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 /// @title PlaceLaunchFactoryCore
 /// @notice Shared genesis + governance for single-sided Uniswap v4 launchpads. Concrete factories provide the
@@ -166,8 +168,38 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         bool metadataEditable;
         string[] metadataKeys;
         string[] metadataValues;
-        address creatorFeeRecipient;
+        Economics economics;
     }
+
+    /// @notice Place: launch economics (LAUNCH.md §4). Shares are bps of the creator's 75%: `buybackBps` and
+    ///         `rewardsBps` first, `xShares` split what remains, the creator keeps the rest. Frozen in the launch's
+    ///         PlaceCreatorVault (buyback and rewards can only go up later).
+    struct Economics {
+        uint16 buybackBps;
+        bool buybackBurn;
+        uint16 rewardsBps;
+        PlaceCreatorVault.XShare[] xShares;
+    }
+
+    /// @notice Place: settings every new vault copies (future launches only; each vault freezes its copy).
+    struct VaultSettings {
+        address hub;
+        address xRegistry;
+        uint64 campaignInterval;
+        bytes32 rulesHash;
+        string rulesURI;
+    }
+
+    /// @notice Place: clone template of PlaceCreatorVault.
+    address public immutable creatorVaultImplementation;
+    VaultSettings internal _vaultSettings;
+    /// @notice Place: minimum rewards pool for a holders campaign, per quote (frozen into each vault).
+    mapping(address quoteToken => uint256 minimum) public rewardsMinimum;
+
+    event VaultSettingsUpdated(
+        address hub, address xRegistry, uint64 campaignInterval, bytes32 rulesHash, string rulesURI
+    );
+    event RewardsMinimumUpdated(address indexed quoteToken, uint256 minimum);
 
     struct LaunchBuyParams {
         address fundingToken;
@@ -180,6 +212,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         uint256 supply;
         bytes32 scopedSalt;
         address predictedToken;
+        address vault;
         bool tokenIsCurrency0;
         int24 spacing;
         int24 startTick;
@@ -229,9 +262,6 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         address previousCreatorFeeRecipient,
         address newCreatorFeeRecipient
     );
-    event CreatorFeeRecipientUpdated(
-        address indexed token, address indexed previousCreatorFeeRecipient, address indexed newCreatorFeeRecipient
-    );
     event CreatorAdminTransferStarted(address indexed currentCreatorAdmin, address indexed pendingCreatorAdmin);
     event CreatorAdminTransferCancelled(
         address indexed currentCreatorAdmin, address indexed cancelledPendingCreatorAdmin
@@ -280,6 +310,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         int24 tickSpacing;
         address protocolFeeRecipient;
         Band[] bandTemplate;
+        address creatorVaultImplementation;
     }
 
     constructor(
@@ -294,6 +325,8 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         ) revert InvalidConfig();
         poolManager = poolManagerAddress;
         hook = launchHook;
+        if (initialFactoryConfiguration.creatorVaultImplementation.code.length == 0) revert InvalidConfig();
+        creatorVaultImplementation = initialFactoryConfiguration.creatorVaultImplementation;
         launchValidation = new PlaceLaunchValidation();
         _setLaunchSupply(initialFactoryConfiguration.launchSupply);
         _applyTickSpacing(initialFactoryConfiguration.tickSpacing);
@@ -382,7 +415,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
             originalCreator: originalCreator,
             currentCreator: originalCreator,
             pendingCreator: address(0),
-            creatorFeeRecipient: launchParams.creatorFeeRecipient,
+            creatorFeeRecipient: preparation.vault,
             poolId: poolId,
             metadataEditable: launchParams.metadataEditable
         });
@@ -423,9 +456,10 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         isLaunchSaltUsed[preparation.scopedSalt] = true;
         preparation.predictedToken = _predictTokenAddress(launchParams, preparation.scopedSalt, preparation.supply);
         _validatePredictedToken(preparation.predictedToken);
-        launchValidation.validateLaunchRecipients(
-            this, launchParams.creatorFeeRecipient, address(0), preparation.predictedToken
-        );
+        // Place: the creator fee recipient is always the launch's own vault clone (LAUNCH.md decision #16).
+        preparation.vault =
+            Clones.predictDeterministicAddress(creatorVaultImplementation, preparation.scopedSalt, address(this));
+        launchValidation.validateLaunchRecipients(this, preparation.vault, address(0), preparation.predictedToken);
         preparation.tokenIsCurrency0 = uint160(preparation.predictedToken) < uint160(launchParams.quoteToken);
         preparation.spacing = tickSpacing;
         preparation.startTick =
@@ -551,17 +585,13 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         if (previousCreatorAdmin != address(0)) emit CreatorAdminRevoked(previousCreatorAdmin);
     }
 
-    function adminReassignCreatorRights(address token, address newCreator, address newCreatorFeeRecipient)
-        external
-        nonReentrant
-    {
+    /// @dev Place: no fee recipient argument; the recipient is the launch's vault and never changes.
+    function adminReassignCreatorRights(address token, address newCreator) external nonReentrant {
         _requireOwnerOrCreatorAdmin();
         CreatorRights storage rights = _requireCreatorRights(token);
         _validateCreatorRightsAddress(token, newCreator);
         if (newCreator == rights.currentCreator) revert InvalidConfig();
-        PlaceLaunchOperations.reassignCreatorRights(
-            rights, token, newCreator, newCreatorFeeRecipient, launchValidation, hook
-        );
+        PlaceLaunchOperations.reassignCreatorRights(rights, token, newCreator, launchValidation, hook);
     }
 
     function proposeCreatorRightsTransfer(address token, address newCreator) external nonReentrant {
@@ -585,12 +615,6 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         CreatorRights storage rights = _requireCreatorRights(token);
         if (msg.sender != rights.pendingCreator || msg.sender == address(0)) revert NotPendingCreator();
         PlaceLaunchOperations.transferCreatorRights(rights, token, msg.sender, launchValidation, hook);
-    }
-
-    function setCreatorFeeRecipient(address token, address newCreatorFeeRecipient) external nonReentrant {
-        PlaceLaunchOperations.setCreatorFeeRecipient(
-            _requireCurrentCreator(token), token, newCreatorFeeRecipient, launchValidation, hook
-        );
     }
 
     function safeTransferCreatorRights(address token, address rightsReceiver, bytes calldata callbackData)
@@ -681,13 +705,6 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         PlaceLaunchOperations.emitTaxPolicy(_policyState, configVersion);
     }
 
-    function adminSetCreatorFeeRecipient(address token, address recipient) external nonReentrant {
-        _requireOwnerOrCreatorAdmin();
-        PlaceLaunchOperations.setCreatorFeeRecipient(
-            _requireCreatorRights(token), token, recipient, launchValidation, hook
-        );
-    }
-
     function _requireOwnerOrCreatorAdmin() internal view {
         if (msg.sender == address(0) || (msg.sender != owner() && msg.sender != creatorAdmin)) {
             revert NotOwnerOrCreatorAdmin();
@@ -751,6 +768,29 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         hook.setLaunchBuyAdapter(newLaunchBuyAdapter);
         _bumpConfigVersion();
         emit LaunchBuyAdapterUpdated(previousAdapter, newLaunchBuyAdapter);
+    }
+
+    /// @notice Place: hub, X registry and campaign rules that new vaults copy (LAUNCH.md decision #15).
+    function setVaultSettings(VaultSettings calldata settings) external onlyOwner nonReentrant {
+        if (settings.hub != address(0) && (settings.rulesHash == bytes32(0) || bytes(settings.rulesURI).length == 0)) {
+            revert InvalidConfig();
+        }
+        _vaultSettings = settings;
+        _bumpConfigVersion();
+        emit VaultSettingsUpdated(
+            settings.hub, settings.xRegistry, settings.campaignInterval, settings.rulesHash, settings.rulesURI
+        );
+    }
+
+    /// @notice Place: minimum rewards pool per quote for new vaults (e.g. 0.05 ETH).
+    function setRewardsMinimum(address quoteToken, uint256 minimum) external onlyOwner nonReentrant {
+        rewardsMinimum[quoteToken] = minimum;
+        _bumpConfigVersion();
+        emit RewardsMinimumUpdated(quoteToken, minimum);
+    }
+
+    function vaultSettings() external view returns (VaultSettings memory) {
+        return _vaultSettings;
     }
 
     function setNativeLaunchFee(uint256 newNativeLaunchFee) external onlyOwner nonReentrant {

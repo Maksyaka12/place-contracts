@@ -5,6 +5,7 @@ import {LaunchFixture} from "../utils/LaunchFixture.sol";
 import {PlaceLaunchFactoryCore} from "../../src/launch/PlaceLaunchFactoryCore.sol";
 import {PlaceLaunchOperations} from "../../src/launch/PlaceLaunchOperations.sol";
 import {IB20, IB20Factory} from "../../src/launch/interfaces/IB20.sol";
+import {PlaceCreatorVault} from "../../src/place/PlaceCreatorVault.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -70,13 +71,15 @@ contract LaunchB20ForkTest is LaunchFixture {
         vm.warp(block.timestamp + 21);
         _swap(TRADER, key, token, true, 0.1 ether);
         assertEq(escrow.owed(PLATFORM, address(0)), 0.00025 ether);
-        assertEq(escrow.owed(CREATOR, address(0)), 0.00075 ether);
+        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.00075 ether);
         uint256 bought = IERC20(token).balanceOf(TRADER);
         assertGt(bought, 0);
         _swap(TRADER, key, token, false, bought / 2);
-        assertGt(escrow.owed(CREATOR, address(0)), 0.00075 ether);
-        escrow.claimFor(CREATOR, address(0));
-        assertGt(CREATOR.balance, 0);
+        assertGt(escrow.owed(address(_vault(token)), address(0)), 0.00075 ether);
+        PlaceCreatorVault vault = _vault(token);
+        vm.prank(CREATOR);
+        vault.claim(0);
+        assertGt(CREATOR.balance, 0, "creator paid through the vault");
     }
 
     function _mined(PlaceLaunchFactoryCore.LaunchParams memory p)
