@@ -57,7 +57,7 @@ abstract contract PlaceTokenFactoryBase is PlaceLaunchFactoryCore {
             PlaceLaunchOperations.Context(hook, tokenDeployer, _policyState.policy, placeTaxConfiguration()),
             params,
             preparation,
-            isFactoryToken,
+            launchTokenKind,
             creator
         );
     }

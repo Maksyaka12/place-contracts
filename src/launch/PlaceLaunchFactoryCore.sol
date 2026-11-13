@@ -137,10 +137,25 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
     address public announcementRegistry;
     uint64 public configVersion = 1;
     mapping(bytes32 scopedSalt => bool used) public isLaunchSaltUsed;
+    /// @notice Place: token standard of a launch. NONE = not created by this factory.
+    enum TokenKind {
+        NONE,
+        ERC20,
+        B20
+    }
+
     /// @notice Place: tokens this factory created (set during the launch, before the hook registers the pool).
-    mapping(address token => bool created) public isFactoryToken;
+    mapping(address token => TokenKind kind) public launchTokenKind;
+
+    event B20ExtraMetadataUpdated(address indexed token, string metadataKey, string metadataValue);
+
+    /// @notice Place: whether this factory created `token` (the hook checks this in registerPool).
+    function isFactoryToken(address token) external view returns (bool) {
+        return launchTokenKind[token] != TokenKind.NONE;
+    }
 
     struct LaunchParams {
+        TokenKind tokenKind;
         string tokenName;
         string tokenSymbol;
         string tokenContractURI;
@@ -391,6 +406,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         if (bytes(launchParams.tokenName).length == 0 || bytes(launchParams.tokenSymbol).length == 0) {
             revert EmptyTokenNameOrSymbol();
         }
+        if (launchParams.tokenKind == TokenKind.NONE) revert InvalidConfig();
         if (!_quoteConfig[launchParams.quoteToken].registered) revert QuoteNotRegistered();
         if (launchParams.metadataKeys.length != launchParams.metadataValues.length) revert InvalidConfig();
         for (uint256 i = 0; i < launchParams.metadataKeys.length; i++) {
@@ -612,7 +628,13 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         nonReentrant
     {
         _requireMetadataEditor(token);
-        ILaunchTokenMetadata(token).updateExtraMetadata(metadataKey, metadataValue);
+        if (launchTokenKind[token] == TokenKind.B20) {
+            // Place: B20 has no extra metadata store; the factory event is the record.
+            if (bytes(metadataKey).length == 0) revert InvalidConfig();
+            emit B20ExtraMetadataUpdated(token, metadataKey, metadataValue);
+        } else {
+            ILaunchTokenMetadata(token).updateExtraMetadata(metadataKey, metadataValue);
+        }
     }
 
     function _requireCreatorRights(address token) internal view returns (CreatorRights storage rights) {

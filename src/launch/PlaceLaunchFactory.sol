@@ -130,6 +130,13 @@ contract PlaceLaunchFactory is PlaceTokenFactoryBase {
         super.renounceOwnership();
     }
 
+    /// @notice Place: the address a launch by `creator` with these params would get (ERC-20 via CREATE2,
+    ///         B20 via the precompile). Frontends mine `creatorSalt` until it ends in TOKEN_ADDRESS_SUFFIX.
+    function predictLaunchToken(LaunchParams calldata launchParams, address creator) external view returns (address) {
+        return
+            _predictTokenAddress(launchParams, keccak256(abi.encode(creator, launchParams.creatorSalt)), launchSupply);
+    }
+
     function launchTokenInitCodeHash(LaunchParams calldata launchParams) external view returns (bytes32 initCodeHash) {
         return PlaceLaunchOperations.tokenInitCodeHash(tokenDeployer, launchParams, launchSupply, hook);
     }

@@ -8,6 +8,8 @@ import {PlaceFeeMath} from "./PlaceFeeMath.sol";
 import {PlaceLaunchHook} from "./PlaceLaunchHook.sol";
 import {PlaceLaunchToken} from "./PlaceLaunchToken.sol";
 import {PlaceLaunchTokenDeployer} from "./PlaceLaunchTokenDeployer.sol";
+import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
+import {IB20, IB20Factory} from "./interfaces/IB20.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
@@ -144,21 +146,25 @@ library PlaceLaunchOperations {
         Context memory context,
         Core.LaunchParams calldata params,
         Core.LaunchPreparation memory preparation,
-        mapping(address => bool) storage isFactoryToken,
+        mapping(address => Core.TokenKind) storage launchTokenKind,
         address originalCreator
     ) public returns (address token, PoolId poolId, PoolKey memory key) {
-        PlaceLaunchToken.GenesisParams memory genesis = tokenParams(params, preparation.supply, context.hook);
-        token = context.tokenDeployer.deploy(preparation.scopedSalt, genesis);
-        if (token != preparation.predictedToken) revert TokenMismatch();
-        isFactoryToken[token] = true;
-        PlaceLaunchToken asset = PlaceLaunchToken(token);
-        if (
-            asset.factory() != address(this) || asset.totalSupply() != preparation.supply
-                || asset.supplyCap() != preparation.supply || asset.decimals() != 18
-                || asset.hasRole(asset.DEFAULT_ADMIN_ROLE(), originalCreator)
-                || asset.metadataAuthority() != genesis.metadataAuthority
-                || asset.hasRole(asset.METADATA_ROLE(), address(this)) != params.metadataEditable
-        ) revert NotImmutable();
+        if (params.tokenKind == Core.TokenKind.B20) {
+            token = _createB20(params, preparation, address(context.hook), originalCreator);
+        } else {
+            PlaceLaunchToken.GenesisParams memory genesis = tokenParams(params, preparation.supply, context.hook);
+            token = context.tokenDeployer.deploy(preparation.scopedSalt, genesis);
+            if (token != preparation.predictedToken) revert TokenMismatch();
+            PlaceLaunchToken asset = PlaceLaunchToken(token);
+            if (
+                asset.factory() != address(this) || asset.totalSupply() != preparation.supply
+                    || asset.supplyCap() != preparation.supply || asset.decimals() != 18
+                    || asset.hasRole(asset.DEFAULT_ADMIN_ROLE(), originalCreator)
+                    || asset.metadataAuthority() != genesis.metadataAuthority
+                    || asset.hasRole(asset.METADATA_ROLE(), address(this)) != params.metadataEditable
+            ) revert NotImmutable();
+        }
+        launchTokenKind[token] = params.tokenKind;
         Currency c0 = Currency.wrap(params.quoteToken);
         Currency c1 = Currency.wrap(token);
         if (preparation.tokenIsCurrency0) {
@@ -192,7 +198,96 @@ library PlaceLaunchOperations {
         uint256 supply,
         PlaceLaunchHook hook
     ) public view returns (address) {
+        if (params.tokenKind == Core.TokenKind.B20) {
+            return IB20Factory(PlaceSuiteConstants.B20_FACTORY)
+                .getB20Address(PlaceSuiteConstants.B20_ASSET_VARIANT, address(this), salt);
+        }
         return deployer.predictTokenAddress(salt, tokenParams(params, supply, hook));
+    }
+
+    // ---- Place: B20 genesis (LAUNCH.md §8.4) ----
+
+    /// @dev Emitted by the factory for B20 launches, which have no on-token extra metadata store (the ERC-20
+    ///      token emits ExtraMetadataUpdated itself).
+    event B20ExtraMetadataUpdated(address indexed token, string metadataKey, string metadataValue);
+
+    /// @notice Creates the B20 with no admin at all: the supply cap, the whole mint to the hook, the optional
+    ///         contract URI and (if editable) METADATA_ROLE for this factory all run as creation-time initCalls,
+    ///         which skip role checks. Nobody can ever mint, raise the cap, pause, seize, set transfer policies
+    ///         or grant roles afterwards. The factory exposes no symbol update, so the ticker never changes.
+    function _createB20(
+        Core.LaunchParams calldata params,
+        Core.LaunchPreparation memory preparation,
+        address hook,
+        address originalCreator
+    ) private returns (address token) {
+        bool withURI = bytes(params.tokenContractURI).length != 0;
+        bytes[] memory initCalls = new bytes[](2 + (withURI ? 1 : 0) + (params.metadataEditable ? 1 : 0));
+        initCalls[0] = abi.encodeCall(IB20.updateSupplyCap, (preparation.supply));
+        initCalls[1] = abi.encodeCall(IB20.mint, (hook, preparation.supply));
+        uint256 next = 2;
+        if (withURI) initCalls[next++] = abi.encodeCall(IB20.updateContractURI, (params.tokenContractURI));
+        if (params.metadataEditable) {
+            initCalls[next] = abi.encodeCall(IB20.grantRole, (PlaceSuiteConstants.B20_METADATA_ROLE, address(this)));
+        }
+        bytes memory createParams = abi.encode(
+            IB20Factory.B20AssetCreateParams({
+                version: PlaceSuiteConstants.B20_PARAMS_VERSION,
+                name: params.tokenName,
+                symbol: params.tokenSymbol,
+                initialAdmin: address(0), // none, ever
+                decimals: PlaceSuiteConstants.TOKEN_DECIMALS
+            })
+        );
+        token = IB20Factory(PlaceSuiteConstants.B20_FACTORY)
+            .createB20(PlaceSuiteConstants.B20_ASSET_VARIANT, preparation.scopedSalt, createParams, initCalls);
+        if (token != preparation.predictedToken) revert TokenMismatch();
+        _requireImmutableB20(IB20(token), preparation.supply, hook, originalCreator, params.metadataEditable);
+        for (uint256 i = 0; i < params.metadataKeys.length; i++) {
+            emit B20ExtraMetadataUpdated(token, params.metadataKeys[i], params.metadataValues[i]);
+        }
+    }
+
+    /// @notice B20 immutability check: fixed supply all held by the hook, no admin, no privileged role for the
+    ///         factory, hook or creator (other than the factory's METADATA_ROLE when editable), nothing paused
+    ///         and every transfer/mint/seize policy at 0 (allow all).
+    function _requireImmutableB20(IB20 asset, uint256 supply, address hook, address creator, bool editable)
+        private
+        view
+    {
+        if (
+            !IB20Factory(PlaceSuiteConstants.B20_FACTORY).isB20(address(asset)) || asset.totalSupply() != supply
+                || asset.supplyCap() != supply || asset.balanceOf(hook) != supply
+                || asset.decimals() != PlaceSuiteConstants.TOKEN_DECIMALS || asset.pausedFeatures().length != 0
+                || asset.hasRole(asset.METADATA_ROLE(), address(this)) != editable
+                || asset.hasRole(asset.METADATA_ROLE(), creator) || asset.hasRole(asset.METADATA_ROLE(), hook)
+        ) revert NotImmutable();
+        bytes32[7] memory roles = [
+            asset.DEFAULT_ADMIN_ROLE(),
+            asset.MINT_ROLE(),
+            asset.BURN_ROLE(),
+            asset.BURN_BLOCKED_ROLE(),
+            asset.SEIZE_ROLE(),
+            asset.PAUSE_ROLE(),
+            asset.UNPAUSE_ROLE()
+        ];
+        for (uint256 i = 0; i < roles.length; i++) {
+            if (
+                asset.hasRole(roles[i], address(this)) || asset.hasRole(roles[i], hook)
+                    || asset.hasRole(roles[i], creator)
+            ) revert NotImmutable();
+        }
+        bytes32[6] memory scopes = [
+            asset.TRANSFER_SENDER_POLICY(),
+            asset.TRANSFER_RECEIVER_POLICY(),
+            asset.TRANSFER_EXECUTOR_POLICY(),
+            asset.MINT_RECEIVER_POLICY(),
+            asset.SEIZE_EXEMPT_POLICY(),
+            asset.SEIZE_RECEIVER_POLICY()
+        ];
+        for (uint256 i = 0; i < scopes.length; i++) {
+            if (asset.policyId(scopes[i]) != 0) revert NotImmutable();
+        }
     }
 
     function tokenInitCodeHash(

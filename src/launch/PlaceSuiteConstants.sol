@@ -22,4 +22,11 @@ library PlaceSuiteConstants {
     uint32 internal constant ANTI_SNIPE_START_FEE_RATE = 99_000_000; // 99% at launch
     uint32 internal constant ANTI_SNIPE_WINDOW_SECONDS = 20; // decays linearly to 1%
     uint256 internal constant NATIVE_LAUNCH_FEE = 0.0005 ether;
+
+    // Base B20 (LAUNCH.md §8.4): factory precompile, ASSET variant, token decimals.
+    address internal constant B20_FACTORY = 0xB20f000000000000000000000000000000000000;
+    uint8 internal constant B20_ASSET_VARIANT = 0;
+    uint8 internal constant B20_PARAMS_VERSION = 1;
+    uint8 internal constant TOKEN_DECIMALS = 18;
+    bytes32 internal constant B20_METADATA_ROLE = keccak256("METADATA_ROLE");
 }
