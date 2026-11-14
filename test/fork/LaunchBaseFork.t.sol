@@ -41,7 +41,7 @@ contract LaunchBaseForkTest is LaunchFixture {
         uint256 bought = IERC20(token).balanceOf(TRADER);
         assertGt(bought, 0, "bought");
         address vault = address(_vault(token));
-        assertEq(escrow.owed(PLATFORM, quote) * 3, escrow.owed(vault, quote), "75/25");
+        assertApproxEqAbs(escrow.owed(PLATFORM, quote) * 7, escrow.owed(vault, quote) * 3, 10, "70/30");
         _swap(TRADER, key, token, false, bought / 2);
         assertGt(escrow.owed(vault, quote), 0);
         escrow.claimFor(vault, quote);

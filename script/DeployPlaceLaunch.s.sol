@@ -16,8 +16,10 @@ import {AnnouncementRegistry} from "../src/AnnouncementRegistry.sol";
 import {PlaceCreatorVault} from "../src/place/PlaceCreatorVault.sol";
 import {XRecipientRegistry} from "../src/place/XRecipientRegistry.sol";
 import {PlaceLaunchBuyAdapter} from "../src/place/PlaceLaunchBuyAdapter.sol";
+import {PlaceRewardTokenRegistry} from "../src/place/PlaceRewardTokenRegistry.sol";
+import {PlaceStaking} from "../src/staking/PlaceStaking.sol";
 
-/// @notice Deploys and wires the whole Place Launch suite (the deploy itself is stage L2).
+/// @notice Deploys and wires the whole Place Launch suite (stage L2, economy of stage L5).
 ///
 ///   forge script script/DeployPlaceLaunch.s.sol --rpc-url base_sepolia --account <keystore> \
 ///     --sender <address> --broadcast --non-interactive
@@ -25,13 +27,20 @@ import {PlaceLaunchBuyAdapter} from "../src/place/PlaceLaunchBuyAdapter.sol";
 /// Settings come from the environment (no private keys: sign with --account / --ledger):
 ///   POOL_MANAGER            Uniswap v4 PoolManager (Base Sepolia 0x05E7…3408, Base 0x4985…2b2b)
 ///   PROTOCOL_FEE_RECIPIENT  platform fee + anti-snipe + launch fee recipient (Safe on mainnet)
-///   PLACE_HUB               PlaceHub for holder reward campaigns (0 = rewards off for new launches)
+///   PLACE_HUB               PlaceHub for community fund campaigns (0 = community fund off for new launches)
 ///   X_VERIFIER              signer of X bindings (0 = bindings paused)
-///   FINAL_OWNER             optional: Safe that must acceptOwnership of factory and X registry
+///   FINAL_OWNER             optional: Safe that must acceptOwnership of factory, X registry, reward-token
+///                           registry and staking
 ///   RULES_URI, RULES_HASH   holder campaign rules (required when PLACE_HUB is set)
+///   PLACE_STAKING           existing PlaceStaking (default: deploy one, fee STAKING_FEE_BPS, default 500 = 5%)
+///   MAX_PRICE_IMPACT_BPS    per-hop cap of fund swaps in the reward-token registry, default 100 (1%)
+///   PROCESS_INTERVAL        seconds between burns, default 1 day
+///   DEFAULT_CAMPAIGN_DELAY  idle fund -> default campaign, default 30 days
+///   ETH_MAX_BURN            burn cap per process() in ETH, default 0.01 ether
+///   ETH_DEFAULT_MINIMUM     default campaign minimum in ETH, default 0.05 ether
 ///   ETH_START_TICK          default -200600 (o1's current ETH tick, ~ $4k FDV)
-///   ETH_REWARDS_MINIMUM     default 0.05 ether
 ///   ENABLE_LAUNCHES         default false
+/// Reward-token routes are listed afterwards by the registry owner (`setRoute`).
 /// Other quotes are registered afterwards with script/RegisterQuotes.s.sol.
 contract DeployPlaceLaunch is Script {
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
@@ -50,6 +59,8 @@ contract DeployPlaceLaunch is Script {
         PlaceCreatorVault vaultImplementation;
         XRecipientRegistry xRegistry;
         PlaceLaunchBuyAdapter adapter;
+        PlaceRewardTokenRegistry rewardRegistry;
+        PlaceStaking staking;
     }
 
     function run() external returns (Deployed memory d) {
@@ -63,6 +74,10 @@ contract DeployPlaceLaunch is Script {
         // 1. Hook at a CREATE2 address whose low 14 bits are its permission flags.
         bytes memory hookInit = abi.encodePacked(type(PlaceLaunchHook).creationCode, abi.encode(pm, deployer));
         (address hookAddress, bytes32 hookSalt) = HookMiner.find(CREATE2_DEPLOYER, HOOK_FLAGS, hookInit);
+        // A previous deploy from the same deployer may already sit at the first match: take the next one.
+        while (hookAddress.code.length != 0) {
+            (hookAddress, hookSalt) = HookMiner.findFrom(CREATE2_DEPLOYER, HOOK_FLAGS, hookInit, uint256(hookSalt) + 1);
+        }
         console.log("hook (mined)", hookAddress);
 
         vm.startBroadcast(deployer);
@@ -94,27 +109,45 @@ contract DeployPlaceLaunch is Script {
         d.announcements = new AnnouncementRegistry(address(d.factory));
         d.factory.setAnnouncementRegistry(address(d.announcements));
 
-        // 4. Place additions: X registry, dev-buy adapter, vault settings, ETH quote.
+        // 4. Place additions: X registry, dev-buy adapter, economy (staking, reward-token registry), vault settings.
         d.xRegistry = new XRecipientRegistry(deployer, xVerifier);
         d.adapter = new PlaceLaunchBuyAdapter(address(d.factory), address(d.hook), address(pm));
         d.factory.setLaunchBuyAdapter(address(d.adapter));
+        address existingStaking = vm.envOr("PLACE_STAKING", address(0));
+        d.staking = existingStaking != address(0)
+            ? PlaceStaking(payable(existingStaking))
+            : new PlaceStaking(deployer, uint16(vm.envOr("STAKING_FEE_BPS", uint256(500))), protocolRecipient);
+        d.rewardRegistry =
+            new PlaceRewardTokenRegistry(deployer, uint16(vm.envOr("MAX_PRICE_IMPACT_BPS", uint256(100))));
         d.factory
             .setVaultSettings(
                 PlaceLaunchFactoryCore.VaultSettings({
                     hub: hub,
                     xRegistry: address(d.xRegistry),
-                    campaignInterval: 7 days,
+                    staking: address(d.staking),
+                    rewardRegistry: address(d.rewardRegistry),
+                    processInterval: uint64(vm.envOr("PROCESS_INTERVAL", uint256(1 days))),
+                    defaultCampaignDelay: uint64(vm.envOr("DEFAULT_CAMPAIGN_DELAY", uint256(30 days))),
                     rulesHash: hub == address(0) ? bytes32(0) : vm.envBytes32("RULES_HASH"),
                     rulesURI: hub == address(0) ? "" : vm.envString("RULES_URI")
                 })
             );
-        d.factory.setRewardsMinimum(address(0), vm.envOr("ETH_REWARDS_MINIMUM", uint256(0.05 ether)));
+        d.factory
+            .setQuoteLimits(
+                address(0),
+                PlaceLaunchFactoryCore.QuoteLimits({
+                    maxBurnPerProcess: uint128(vm.envOr("ETH_MAX_BURN", uint256(0.01 ether))),
+                    defaultCampaignMinimum: uint128(vm.envOr("ETH_DEFAULT_MINIMUM", uint256(0.05 ether)))
+                })
+            );
         d.factory.registerQuote(address(0), int24(vm.envOr("ETH_START_TICK", int256(-200_600))));
         if (vm.envOr("ENABLE_LAUNCHES", false)) d.factory.setLaunchCreationEnabled(true);
 
         if (finalOwner != address(0)) {
             d.factory.transferOwnership(finalOwner);
             d.xRegistry.transferOwnership(finalOwner);
+            d.rewardRegistry.transferOwnership(finalOwner);
+            if (existingStaking == address(0)) d.staking.transferOwnership(finalOwner);
         }
         vm.stopBroadcast();
 
@@ -126,5 +159,7 @@ contract DeployPlaceLaunch is Script {
         console.log("XRecipientRegistry", address(d.xRegistry));
         console.log("PlaceLaunchBuyAdapter", address(d.adapter));
         console.log("PlaceLaunchTokenDeployer", address(d.tokenDeployer));
+        console.log("PlaceRewardTokenRegistry", address(d.rewardRegistry));
+        console.log("PlaceStaking", address(d.staking));
     }
 }

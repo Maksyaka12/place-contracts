@@ -95,7 +95,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         );
     }
 
-    /// @notice Place: the fixed per-launch fee configuration. 1% on buys and sells; the protocol cut (25% of
+    /// @notice Place: the fixed per-launch fee configuration. 1% on buys and sells; the protocol cut (30% of
     ///         the fee, see `_placePolicy`) comes off the top and the whole remainder goes to the creator side.
     ///         No burn, dividend or integrator share.
     function placeTaxConfiguration() public pure returns (PlaceFeeMath.TaxConfiguration memory configuration) {
@@ -171,13 +171,12 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         Economics economics;
     }
 
-    /// @notice Place: launch economics (LAUNCH.md §4). Shares are bps of the creator's 75%: `buybackBps` and
-    ///         `rewardsBps` first, `xShares` split what remains, the creator keeps the rest. Frozen in the launch's
-    ///         PlaceCreatorVault (buyback and rewards can only go up later).
+    /// @notice Place: launch economics (LAUNCH.md §4, decision #19). Three baskets of the creator's 70%, in bps:
+    ///         `burnBps` (buyback to 0x…dEaD), `communityBps` (community fund); `xShares` split what remains and
+    ///         the creator keeps the rest. Frozen in the launch's PlaceCreatorVault (can only go up later).
     struct Economics {
-        uint16 buybackBps;
-        bool buybackBurn;
-        uint16 rewardsBps;
+        uint16 burnBps;
+        uint16 communityBps;
         PlaceCreatorVault.XShare[] xShares;
     }
 
@@ -185,21 +184,28 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
     struct VaultSettings {
         address hub;
         address xRegistry;
-        uint64 campaignInterval;
+        address staking;
+        address rewardRegistry;
+        uint64 processInterval;
+        uint64 defaultCampaignDelay;
         bytes32 rulesHash;
         string rulesURI;
+    }
+
+    /// @notice Place: per-quote limits every new vault copies (LAUNCH.md §4.2–4.3).
+    struct QuoteLimits {
+        uint128 maxBurnPerProcess;
+        uint128 defaultCampaignMinimum;
     }
 
     /// @notice Place: clone template of PlaceCreatorVault.
     address public immutable creatorVaultImplementation;
     VaultSettings internal _vaultSettings;
-    /// @notice Place: minimum rewards pool for a holders campaign, per quote (frozen into each vault).
-    mapping(address quoteToken => uint256 minimum) public rewardsMinimum;
+    /// @notice Place: burn cap per `process()` and default campaign minimum, per quote (frozen into each vault).
+    mapping(address quoteToken => QuoteLimits limits) public quoteLimits;
 
-    event VaultSettingsUpdated(
-        address hub, address xRegistry, uint64 campaignInterval, bytes32 rulesHash, string rulesURI
-    );
-    event RewardsMinimumUpdated(address indexed quoteToken, uint256 minimum);
+    event VaultSettingsUpdated(VaultSettings settings);
+    event QuoteLimitsUpdated(address indexed quoteToken, uint128 maxBurnPerProcess, uint128 defaultCampaignMinimum);
 
     struct LaunchBuyParams {
         address fundingToken;
@@ -770,23 +776,19 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         emit LaunchBuyAdapterUpdated(previousAdapter, newLaunchBuyAdapter);
     }
 
-    /// @notice Place: hub, X registry and campaign rules that new vaults copy (LAUNCH.md decision #15).
+    /// @notice Place: hub, staking, reward-token registry, X registry, cadence and campaign rules that new vaults
+    ///         copy (LAUNCH.md §4). The vault validates them at launch.
     function setVaultSettings(VaultSettings calldata settings) external onlyOwner nonReentrant {
-        if (settings.hub != address(0) && (settings.rulesHash == bytes32(0) || bytes(settings.rulesURI).length == 0)) {
-            revert InvalidConfig();
-        }
         _vaultSettings = settings;
         _bumpConfigVersion();
-        emit VaultSettingsUpdated(
-            settings.hub, settings.xRegistry, settings.campaignInterval, settings.rulesHash, settings.rulesURI
-        );
+        emit VaultSettingsUpdated(settings);
     }
 
-    /// @notice Place: minimum rewards pool per quote for new vaults (e.g. 0.05 ETH).
-    function setRewardsMinimum(address quoteToken, uint256 minimum) external onlyOwner nonReentrant {
-        rewardsMinimum[quoteToken] = minimum;
+    /// @notice Place: per-quote burn cap and default campaign minimum for new vaults (e.g. 0.01 / 0.05 ETH).
+    function setQuoteLimits(address quoteToken, QuoteLimits calldata limits) external onlyOwner nonReentrant {
+        quoteLimits[quoteToken] = limits;
         _bumpConfigVersion();
-        emit RewardsMinimumUpdated(quoteToken, minimum);
+        emit QuoteLimitsUpdated(quoteToken, limits.maxBurnPerProcess, limits.defaultCampaignMinimum);
     }
 
     function vaultSettings() external view returns (VaultSettings memory) {

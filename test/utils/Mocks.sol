@@ -41,8 +41,13 @@ contract MockHub is IPlaceHub, IPlaceConfig {
         require(msg.sender == creators[id], "creator");
         uint256 amount = paid[id];
         paid[id] = 0;
-        (bool ok,) = msg.sender.call{value: amount}("");
-        require(ok, "refund");
+        address reward = _created[id].rewardToken;
+        if (reward == address(0)) {
+            (bool ok,) = msg.sender.call{value: amount}("");
+            require(ok, "refund");
+        } else {
+            IERC20(reward).transfer(msg.sender, amount);
+        }
     }
 
     function created(uint256 id) external view returns (CreateParams memory) {
@@ -59,5 +64,30 @@ contract MockXRegistry {
 
     function bind(uint256 xId, address wallet) external {
         recipientOf[xId] = wallet;
+    }
+}
+
+/// @notice FeeEscrow stand-in for vault-only fuzzing: `owed` ETH is paid out on `claimFor`.
+contract MockEscrow {
+    mapping(address => mapping(address => uint256)) public owed;
+
+    function credit(address recipient) external payable {
+        owed[recipient][address(0)] += msg.value;
+    }
+
+    function claimFor(address recipient, address currency) external {
+        uint256 amount = owed[recipient][currency];
+        owed[recipient][currency] = 0;
+        (bool ok,) = recipient.call{value: amount}("");
+        require(ok, "pay");
+    }
+}
+
+/// @notice Hook stand-in that only tells the vault its PoolManager.
+contract MockHookPm {
+    address public poolManager;
+
+    constructor(address pm) {
+        poolManager = pm;
     }
 }

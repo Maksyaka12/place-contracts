@@ -61,7 +61,7 @@ abstract contract PlaceTokenFactoryBase is PlaceLaunchFactoryCore {
                 taxConfiguration: placeTaxConfiguration(),
                 vaultImplementation: creatorVaultImplementation,
                 vaultSettings: _vaultSettings,
-                rewardsMinimum: rewardsMinimum[params.quoteToken]
+                quoteLimits: quoteLimits[params.quoteToken]
             }),
             params,
             preparation,

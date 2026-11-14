@@ -118,12 +118,10 @@ library PlaceLaunchOperations {
         PlaceFeeMath.TaxConfiguration taxConfiguration;
         address vaultImplementation;
         Core.VaultSettings vaultSettings;
-        uint256 rewardsMinimum;
+        Core.QuoteLimits quoteLimits;
     }
 
-    event CreatorVaultCreated(
-        address indexed token, address indexed vault, uint16 buybackBps, bool buybackBurn, uint16 rewardsBps
-    );
+    event CreatorVaultCreated(address indexed token, address indexed vault, uint16 burnBps, uint16 communityBps);
 
     error InvalidConfig();
     error TokenMismatch();
@@ -213,21 +211,24 @@ library PlaceLaunchOperations {
                     token: token,
                     poolKey: key,
                     feeEscrow: context.hook.feeEscrow(),
-                    buybackBps: economics.buybackBps,
-                    buybackBurn: economics.buybackBurn,
-                    rewardsBps: economics.rewardsBps,
+                    burnBps: economics.burnBps,
+                    communityBps: economics.communityBps,
                     xShares: economics.xShares,
                     xRegistry: context.vaultSettings.xRegistry,
-                    rewards: PlaceCreatorVault.RewardsConfig({
+                    settings: PlaceCreatorVault.Settings({
                         hub: context.vaultSettings.hub,
-                        minAmount: context.rewardsMinimum,
-                        interval: context.vaultSettings.campaignInterval,
+                        staking: context.vaultSettings.staking,
+                        rewardRegistry: context.vaultSettings.rewardRegistry,
+                        processInterval: context.vaultSettings.processInterval,
+                        defaultCampaignDelay: context.vaultSettings.defaultCampaignDelay,
+                        maxBurnPerProcess: context.quoteLimits.maxBurnPerProcess,
+                        defaultCampaignMinimum: context.quoteLimits.defaultCampaignMinimum,
                         rulesHash: context.vaultSettings.rulesHash,
                         rulesURI: context.vaultSettings.rulesURI
                     })
                 })
             );
-        emit CreatorVaultCreated(token, vault, economics.buybackBps, economics.buybackBurn, economics.rewardsBps);
+        emit CreatorVaultCreated(token, vault, economics.burnBps, economics.communityBps);
     }
 
     // ---- Place: B20 genesis (LAUNCH.md §8.4) ----

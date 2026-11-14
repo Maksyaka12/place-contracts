@@ -70,15 +70,15 @@ contract LaunchB20ForkTest is LaunchFixture {
         PoolKey memory key = _poolKey(token, address(0));
         vm.warp(block.timestamp + 21);
         _swap(TRADER, key, token, true, 0.1 ether);
-        assertEq(escrow.owed(PLATFORM, address(0)), 0.00025 ether);
-        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.00075 ether);
+        assertEq(escrow.owed(PLATFORM, address(0)), 0.0003 ether);
+        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.0007 ether);
         uint256 bought = IERC20(token).balanceOf(TRADER);
         assertGt(bought, 0);
         _swap(TRADER, key, token, false, bought / 2);
-        assertGt(escrow.owed(address(_vault(token)), address(0)), 0.00075 ether);
+        assertGt(escrow.owed(address(_vault(token)), address(0)), 0.0007 ether);
         PlaceCreatorVault vault = _vault(token);
         vm.prank(CREATOR);
-        vault.claim(0);
+        vault.claim();
         assertGt(CREATOR.balance, 0, "creator paid through the vault");
     }
 

@@ -60,9 +60,9 @@ contract LaunchBuyTest is LaunchFixture {
         (address token, uint256 out) = _launchAndBuy(p, address(0), 1 ether, abi.encode(new PoolKey[](0)));
         assertGt(out, 0);
         assertEq(IERC20(token).balanceOf(CREATOR), out);
-        // the launch buy pays the normal 1% (0.25% platform), no 99% anti-snipe surcharge
-        assertEq(escrow.owed(PLATFORM, address(0)), 0.0025 ether);
-        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.0075 ether);
+        // the launch buy pays the normal 1% (0.3% platform), no 99% anti-snipe surcharge
+        assertEq(escrow.owed(PLATFORM, address(0)), 0.003 ether);
+        assertEq(escrow.owed(address(_vault(token)), address(0)), 0.007 ether);
         assertEq(address(adapter).balance, 0);
     }
 
@@ -85,7 +85,7 @@ contract LaunchBuyTest is LaunchFixture {
         (address token, uint256 out) = _launchAndBuy(p, address(usd), 100e18, abi.encode(new PoolKey[](0)));
         assertEq(IERC20(token).balanceOf(CREATOR), out);
         assertEq(usd.balanceOf(CREATOR), 0);
-        assertEq(escrow.owed(PLATFORM, address(usd)), 0.25e18);
+        assertEq(escrow.owed(PLATFORM, address(usd)), 0.3e18);
     }
 
     function test_devBuy_badRoute_reverts() public {

@@ -28,8 +28,8 @@ interface IPlaceHub {
     function refundUnpublished(uint256 id) external;
 }
 
-/// @notice The part of `PlaceConfig` the vault reads: the hub's fee for a target (Place sets 0 for Launch tokens,
-///         LAUNCH.md §7.3; the vault pays whatever the hub asks out of the rewards pool).
+/// @notice The part of `PlaceConfig` the vault reads: the hub's fee for a target (5% like every campaign,
+///         LAUNCH.md §4.3; the vault pays whatever the hub asks out of the community fund).
 interface IPlaceConfig {
     function campaignFeeBps(address target) external view returns (uint16);
 }

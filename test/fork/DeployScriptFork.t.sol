@@ -21,7 +21,12 @@ contract DeployScriptForkTest is Test {
         assertEq(d.hook.factory(), address(d.factory));
         assertEq(d.factory.launchBuyAdapter(), address(d.adapter));
         assertEq(d.factory.nativeLaunchFee(), 0.0005 ether);
-        assertEq(d.factory.taxPolicy().protocolFeeConfiguration.protocolTaxShare, 25_000_000);
+        assertEq(d.factory.taxPolicy().protocolFeeConfiguration.protocolTaxShare, 30_000_000);
+        assertEq(d.factory.vaultSettings().staking, address(d.staking));
+        assertEq(d.factory.vaultSettings().rewardRegistry, address(d.rewardRegistry));
+        (uint16 stakingFee,,) = d.staking.feeConfig();
+        assertEq(stakingFee, 500);
+        assertEq(d.rewardRegistry.maxPriceImpactBps(), 100);
 
         vm.setEnv("FACTORY", vm.toString(address(d.factory)));
         vm.setEnv("QUOTES_FILE", "script/quotes/base.json");

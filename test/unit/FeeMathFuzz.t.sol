@@ -33,16 +33,16 @@ contract FeeMathFuzzTest is Test {
         assertFalse(dividends);
     }
 
-    function test_rates_1pct_25_75() public pure {
+    function test_rates_1pct_30_70() public pure {
         PlaceFeeMath.Rates memory r = PlaceFeeMath.rates(1_000_000, _policy().protocolFeeConfiguration, _config(), 0);
         uint256 full = PlaceSuiteConstants.RATE_SCALE;
         assertEq(r.quoteRate, full / 100, "1%");
-        assertEq(r.protocolRate, full / 400, "0.25%");
-        assertEq(r.creatorRate, full * 3 / 400, "0.75%");
+        assertEq(r.protocolRate, full * 3 / 1000, "0.3%");
+        assertEq(r.creatorRate, full * 7 / 1000, "0.7%");
         assertEq(r.burnRate + r.dividendRate + r.integratorRate, 0);
     }
 
-    /// The whole quote fee is split with nothing lost, platform gets 25% (+ the surcharge), creator the rest.
+    /// The whole quote fee is split with nothing lost, platform gets 30% (+ the surcharge), creator the rest.
     function testFuzz_split_conserves(uint128 amount, uint32 elapsed) public pure {
         uint256 extra = PlaceFeeMath.surcharge(1_000_000, 99_000_000, 1000, 20, 1000 + uint256(elapsed), true);
         PlaceFeeMath.Rates memory r =
@@ -52,9 +52,9 @@ contract FeeMathFuzzTest is Test {
         assertEq(d + i, 0);
         if (extra == 0) {
             assertEq(s, 0);
-            assertApproxEqAbs(p * 3, c, 3);
+            assertApproxEqAbs(p * 7, c * 3, 10);
         }
-        assertLe(c, uint256(amount) * 3 / 4 + 1, "creator never above 75% of the fee");
+        assertLe(c, uint256(amount) * 7 / 10 + 1, "creator never above 70% of the fee");
     }
 
     function testFuzz_surcharge_decaysMonotonically(uint32 a, uint32 b) public pure {

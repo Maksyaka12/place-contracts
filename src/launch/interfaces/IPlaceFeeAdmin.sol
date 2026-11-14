@@ -4,7 +4,7 @@ pragma solidity 0.8.26;
 
 import {PlaceFeeMath} from "../PlaceFeeMath.sol";
 
-/// @notice Owner controls for the swap fee policy. Place fixes the rates (1% fee, 25% of it to the protocol,
+/// @notice Owner controls for the swap fee policy. Place fixes the rates (1% fee, 30% of it to the protocol,
 ///         the rest to the creator side, 99% -> 1% anti-snipe over 20 s); only the protocol fee recipient can
 ///         change, and only for future launches. o1's setTaxPolicy / setTaxFeeBounds /
 ///         setProtocolFeeConfiguration / setAntiSnipeConfiguration / setMinimumDividendHoldingRequirement are removed.
