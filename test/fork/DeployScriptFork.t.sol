@@ -33,12 +33,20 @@ contract DeployScriptForkTest is Test {
         assertEq(d.factory.owner(), address(0xD3910));
         new RegisterQuotes().run();
 
+        // every pair in the file is registered with its start tick (the file is rebuilt from live prices)
+        string memory json = vm.readFile("script/quotes/base.json");
+        address[] memory quotes = vm.parseJsonAddressArray(json, ".quoteTokens");
+        int256[] memory ticks = vm.parseJsonIntArray(json, ".startTicks");
+        for (uint256 i = 0; i < quotes.length; i++) {
+            (bool registered,, int24 tick) = d.factory.quoteConfig(quotes[i]);
+            assertTrue(registered);
+            assertEq(int256(tick), ticks[i]);
+        }
+
         (bool usdc,,) = d.factory.quoteConfig(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
-        (bool nvda, uint8 nvdaDecimals, int24 nvdaTick) =
-            d.factory.quoteConfig(0xb20000000000000000000078ee7ce2fE4908108C);
+        (bool nvda, uint8 nvdaDecimals,) = d.factory.quoteConfig(0xb20000000000000000000078ee7ce2fE4908108C);
         assertTrue(usdc);
         assertTrue(nvda);
         assertEq(nvdaDecimals, 8);
-        assertEq(nvdaTick, -405_600);
     }
 }

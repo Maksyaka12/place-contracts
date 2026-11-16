@@ -9,9 +9,9 @@ import {IRWAQuoteRegistry} from "../src/interfaces/IRWAQuoteRegistry.sol";
 ///   FACTORY=0x… QUOTES_FILE=script/quotes/base.json forge script script/RegisterQuotes.s.sol \
 ///     --rpc-url base --account <owner keystore> --sender <owner> --broadcast
 ///
-/// `script/quotes/base.json` holds the launch pairs (USDC, cbBTC, cbDOGE, cbXRP,
-/// cbLTC, cbADA, cbZEC, cbHYPE and the 288 Coinbase stocks) with their start ticks; ETH is registered by
-/// the deploy script. Already registered quotes are skipped. The price updater keeps ticks current afterwards.
+/// `script/quotes/base.json` holds the launch pairs (USDC, the Coinbase-wrapped majors and the Coinbase stocks
+/// people can pay with) with their start ticks; `node script/quotes/build.mjs` rebuilds it from the Coinbase
+/// Tokenized Stocks API. ETH is registered by the deploy script. Already registered quotes are skipped. The price updater keeps ticks current afterwards.
 contract RegisterQuotes is Script {
     uint256 internal constant BATCH = 64;
 
