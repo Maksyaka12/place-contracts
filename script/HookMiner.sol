@@ -29,7 +29,21 @@ library HookMiner {
         revert("HookMiner: no salt found");
     }
 
-    function computeAddress(address deployer, bytes32 salt, bytes32 initCodeHash) internal pure returns (address) {
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initCodeHash)))));
+    /// @dev Hashes in scratch space past the free memory pointer without moving it. `abi.encodePacked` here
+    ///      allocated 85 bytes per salt that were never freed: after a long search the caller's memory was
+    ///      megabytes long and every later allocation (e.g. contract creation code) paid quadratic expansion gas.
+    function computeAddress(address deployer, bytes32 salt, bytes32 initCodeHash)
+        internal
+        pure
+        returns (address hookAddress)
+    {
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, and(deployer, 0xffffffffffffffffffffffffffffffffffffffff))
+            mstore8(add(ptr, 11), 0xff)
+            mstore(add(ptr, 32), salt)
+            mstore(add(ptr, 64), initCodeHash)
+            hookAddress := and(keccak256(add(ptr, 11), 85), 0xffffffffffffffffffffffffffffffffffffffff)
+        }
     }
 }
