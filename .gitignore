@@ -1,0 +1,11 @@
+# Foundry
+out/
+cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Forge broadcast logs
+broadcast/

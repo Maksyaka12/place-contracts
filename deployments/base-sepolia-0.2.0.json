@@ -1,0 +1,16 @@
+{
+  "announcementRegistry": "0xD9cd4D6B5F49daD3d8CfDf713f9D31A3cF71d9fF",
+  "chainId": 84532,
+  "creatorVaultImplementation": "0x170349bc94Ad1D7f62dc82694D4C4D413649d4B6",
+  "factory": "0xEAAaA64419Bade6977Bf491a9828b68357D47D63",
+  "feeEscrow": "0x4244AFad1c2789E9da79a97E8Ee001Ad744D1dC2",
+  "hook": "0x1206be7D6eFf2Fc2f15A6BdfC88Cfbd697Ea2Acc",
+  "hub": "0x493F55975Bff2e4f111BAd8D51637F3b9763Bdd1",
+  "launchBuyAdapter": "0xbD0c4F2DAb3176159B99d0a2c1F3F74480F3e19C",
+  "launchValidation": "0x85A3163b8460B88FA755171f8576838704600647",
+  "rewardTokenRegistry": "0x092C21C933911A5205588EB1d7592Da358108D5C",
+  "staking": "0x1390719DDD7A3F597AbCdD8B48BcC7dc465220dF",
+  "tokenDeployer": "0xE5eD380Daa6bA73755C2940f5e0be86887dAE47f",
+  "version": "0.2.0-testnet",
+  "xRecipientRegistry": "0x1eB2D5512f0d7A413ACeDb1b2252A9Cbb003E4d3"
+}
