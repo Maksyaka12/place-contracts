@@ -4,8 +4,9 @@ pragma solidity 0.8.26;
 import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @notice Swap fee math: policy validation, the protocol cut, the split of the remainder, the
-///         anti-snipe surcharge and swap fee amounts. Every rounding rule is defined here.
+/// @notice Swap fee math: policy validation, the protocol cut, the split of the remainder into the five
+///         allocations, the anti-snipe surcharge and swap fee amounts. Every rounding rule is defined here.
+/// @dev    The burn allocation is charged in the launched token; every other allocation is charged in the quote.
 library PlaceFeeMath {
     uint256 internal constant PERCENTAGE_SCALE = PlaceSuiteConstants.PERCENTAGE_SCALE;
     uint256 internal constant RATE_SCALE = PlaceSuiteConstants.RATE_SCALE;
@@ -34,18 +35,18 @@ library PlaceFeeMath {
         TaxFeeBounds taxFeeBounds;
         ProtocolFeeConfiguration protocolFeeConfiguration;
         AntiSnipeConfiguration antiSnipeConfiguration;
-        uint256 minimumDividendHoldingRequirement;
     }
 
-    /// @dev Shares divide the remainder after protocol, using the same split on both trading sides.
+    /// @dev Shares divide the remainder after protocol, using the same split on both trading sides. They sum to
+    ///      PERCENTAGE_SCALE whenever a side has a remainder.
     struct TaxConfiguration {
         uint32 buyTaxRate;
         uint32 sellTaxRate;
         uint32 creatorAllocationShare;
+        uint32 holderAllocationShare;
+        uint32 traderAllocationShare;
         uint32 burnAllocationShare;
-        uint32 dividendAllocationShare;
-        uint32 integratorAllocationShare;
-        uint256 minimumDividendHolding;
+        uint32 communityAllocationShare;
     }
 
     struct Rates {
@@ -53,26 +54,33 @@ library PlaceFeeMath {
         uint256 burnRate;
         uint256 protocolRate;
         uint256 creatorRate;
-        uint256 dividendRate;
-        uint256 integratorRate;
+        uint256 holderRate;
+        uint256 traderRate;
+        uint256 communityRate;
         uint256 surchargeRate;
+    }
+
+    struct QuoteSplit {
+        uint256 protocolAmount;
+        uint256 surchargeAmount;
+        uint256 creatorAmount;
+        uint256 holderAmount;
+        uint256 traderAmount;
+        uint256 communityAmount;
     }
 
     struct TaxConfigurationPreview {
         uint64 configVersion;
         Rates buyRates;
         Rates sellRates;
-        bool dividendsEnabled;
-        uint256 minimumDividendHoldingRequirement;
     }
 
     error InvalidTaxBounds();
     error InvalidTaxConfiguration();
     error InvalidProtocolFeeConfiguration();
-    error InvalidMinimumDividendHoldingRequirement();
     error InvalidFeeSchedule();
 
-    function validatePolicy(TaxPolicy memory policy, uint256 supply) internal pure {
+    function validatePolicy(TaxPolicy memory policy) internal pure {
         _validateProtocol(policy.protocolFeeConfiguration);
         uint256 minimum = policy.protocolFeeConfiguration.minimumProtocolFeeRate;
         TaxFeeBounds memory bounds = policy.taxFeeBounds;
@@ -85,7 +93,6 @@ library PlaceFeeMath {
                     && (anti.startTotalFeeRate < bounds.maximumBuyTaxRate
                         || anti.startTotalFeeRate < bounds.maximumSellTaxRate))
         ) revert InvalidFeeSchedule();
-        if (policy.minimumDividendHoldingRequirement > supply) revert InvalidMinimumDividendHoldingRequirement();
     }
 
     function _validateSideBounds(uint256 minimum, uint256 maximum, uint256 protocolMinimum) private pure {
@@ -103,12 +110,14 @@ library PlaceFeeMath {
         ) revert InvalidProtocolFeeConfiguration();
     }
 
-    function validateTax(TaxConfiguration memory tax, TaxPolicy memory policy, uint256 supply)
-        internal
-        pure
-        returns (bool dividendsEnabled)
-    {
-        validatePolicy(policy, supply);
+    /// @notice Sum of the five allocation shares.
+    function shareSum(TaxConfiguration memory tax) internal pure returns (uint256) {
+        return uint256(tax.creatorAllocationShare) + tax.holderAllocationShare + tax.traderAllocationShare
+            + tax.burnAllocationShare + tax.communityAllocationShare;
+    }
+
+    function validateTax(TaxConfiguration memory tax, TaxPolicy memory policy) internal pure {
+        validatePolicy(policy);
         TaxFeeBounds memory bounds = policy.taxFeeBounds;
         if (
             tax.buyTaxRate < bounds.minimumBuyTaxRate || tax.buyTaxRate > bounds.maximumBuyTaxRate
@@ -118,22 +127,12 @@ library PlaceFeeMath {
             - protocolRateNumerator(tax.buyTaxRate, policy.protocolFeeConfiguration);
         uint256 sellRemainder = uint256(tax.sellTaxRate) * PERCENTAGE_SCALE
             - protocolRateNumerator(tax.sellTaxRate, policy.protocolFeeConfiguration);
-        uint256 shares = uint256(tax.creatorAllocationShare) + tax.burnAllocationShare + tax.dividendAllocationShare
-            + tax.integratorAllocationShare;
+        uint256 shares = shareSum(tax);
         if (buyRemainder == 0 && sellRemainder == 0) {
-            if (shares != 0 || tax.minimumDividendHolding != 0) revert InvalidTaxConfiguration();
-            return false;
+            if (shares != 0) revert InvalidTaxConfiguration();
+            return;
         }
         if (shares != PERCENTAGE_SCALE) revert InvalidTaxConfiguration();
-        dividendsEnabled = tax.dividendAllocationShare != 0;
-        if (dividendsEnabled) {
-            if (
-                tax.minimumDividendHolding < policy.minimumDividendHoldingRequirement
-                    || tax.minimumDividendHolding > supply
-            ) revert InvalidMinimumDividendHoldingRequirement();
-        } else if (tax.minimumDividendHolding != 0) {
-            revert InvalidTaxConfiguration();
-        }
     }
 
     /// @dev Denominator is PERCENTAGE_SCALE squared. An admitted zero side bypasses the positive floor.
@@ -167,12 +166,13 @@ library PlaceFeeMath {
         uint256 remainder = totalTaxRate * PERCENTAGE_SCALE - protocolNumerator;
         result.protocolRate = protocolNumerator * PERCENTAGE_SCALE;
         result.creatorRate = remainder * tax.creatorAllocationShare;
+        result.holderRate = remainder * tax.holderAllocationShare;
+        result.traderRate = remainder * tax.traderAllocationShare;
         result.burnRate = remainder * tax.burnAllocationShare;
-        result.dividendRate = remainder * tax.dividendAllocationShare;
-        result.integratorRate = remainder * tax.integratorAllocationShare;
+        result.communityRate = remainder * tax.communityAllocationShare;
         result.surchargeRate = surchargeRate * PERCENTAGE_SCALE * PERCENTAGE_SCALE;
-        result.quoteRate = result.protocolRate + result.creatorRate + result.dividendRate + result.integratorRate
-            + result.surchargeRate;
+        result.quoteRate = result.protocolRate + result.creatorRate + result.holderRate + result.traderRate
+            + result.communityRate + result.surchargeRate;
         if (result.quoteRate + result.burnRate != (totalTaxRate + surchargeRate) * PERCENTAGE_SCALE * PERCENTAGE_SCALE)
         {
             revert InvalidTaxConfiguration();
@@ -222,35 +222,31 @@ library PlaceFeeMath {
         return Math.mulDiv(poolAmount, unspecifiedRate, RATE_SCALE - specifiedRate);
     }
 
-    function splitQuoteFee(uint256 amount, Rates memory rate)
-        internal
-        pure
-        returns (
-            uint256 protocolAmount,
-            uint256 surchargeAmount,
-            uint256 creatorAmount,
-            uint256 dividendAmount,
-            uint256 integratorAmount
-        )
-    {
-        if (amount == 0) return (0, 0, 0, 0, 0);
+    /// @notice Splits a quote fee into the protocol cut, the surcharge and the four quote allocations. Nothing is
+    ///         lost: rounding dust of the allocations goes to the first nonzero one (creator, holders, traders,
+    ///         community); with no quote allocation at all the remainder stays with the protocol.
+    function splitQuoteFee(uint256 amount, Rates memory rate) internal pure returns (QuoteSplit memory s) {
+        if (amount == 0) return s;
         if (rate.quoteRate == 0) revert InvalidFeeSchedule();
-        protocolAmount = Math.mulDiv(amount, rate.protocolRate, rate.quoteRate);
-        surchargeAmount = Math.mulDiv(amount, rate.surchargeRate, rate.quoteRate);
-        uint256 remaining = amount - protocolAmount - surchargeAmount;
-        uint256 allocationRate = rate.creatorRate + rate.dividendRate + rate.integratorRate;
+        s.protocolAmount = Math.mulDiv(amount, rate.protocolRate, rate.quoteRate);
+        s.surchargeAmount = Math.mulDiv(amount, rate.surchargeRate, rate.quoteRate);
+        uint256 remaining = amount - s.protocolAmount - s.surchargeAmount;
+        uint256 allocationRate = rate.creatorRate + rate.holderRate + rate.traderRate + rate.communityRate;
         if (allocationRate == 0) {
-            if (rate.protocolRate != 0) protocolAmount += remaining;
-            else surchargeAmount += remaining;
-        } else if (rate.dividendRate != 0) {
-            creatorAmount = Math.mulDiv(remaining, rate.creatorRate, allocationRate);
-            integratorAmount = Math.mulDiv(remaining, rate.integratorRate, allocationRate);
-            dividendAmount = remaining - creatorAmount - integratorAmount;
-        } else if (rate.creatorRate != 0) {
-            integratorAmount = Math.mulDiv(remaining, rate.integratorRate, allocationRate);
-            creatorAmount = remaining - integratorAmount;
-        } else {
-            integratorAmount = remaining;
+            if (rate.protocolRate != 0) s.protocolAmount += remaining;
+            else s.surchargeAmount += remaining;
+            return s;
+        }
+        s.creatorAmount = Math.mulDiv(remaining, rate.creatorRate, allocationRate);
+        s.holderAmount = Math.mulDiv(remaining, rate.holderRate, allocationRate);
+        s.traderAmount = Math.mulDiv(remaining, rate.traderRate, allocationRate);
+        s.communityAmount = Math.mulDiv(remaining, rate.communityRate, allocationRate);
+        uint256 dust = remaining - s.creatorAmount - s.holderAmount - s.traderAmount - s.communityAmount;
+        if (dust != 0) {
+            if (rate.creatorRate != 0) s.creatorAmount += dust;
+            else if (rate.holderRate != 0) s.holderAmount += dust;
+            else if (rate.traderRate != 0) s.traderAmount += dust;
+            else s.communityAmount += dust;
         }
     }
 

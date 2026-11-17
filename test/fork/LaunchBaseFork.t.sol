@@ -35,7 +35,7 @@ contract LaunchBaseForkTest is LaunchFixture {
     function _roundTrip(PlaceLaunchFactoryCore.TokenKind kind, address quote, uint256 amountIn) internal {
         (address token,) = _launch(_params(kind, quote));
         PoolKey memory key = _poolKey(token, quote);
-        vm.warp(block.timestamp + 21);
+        vm.warp(vm.getBlockTimestamp() + 21);
         if (quote != address(0)) _fund(quote, amountIn);
         _swap(TRADER, key, token, true, amountIn);
         uint256 bought = IERC20(token).balanceOf(TRADER);

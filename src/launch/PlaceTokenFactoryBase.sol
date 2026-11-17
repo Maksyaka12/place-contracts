@@ -50,16 +50,16 @@ abstract contract PlaceTokenFactoryBase is PlaceLaunchFactoryCore {
     function _createLaunchPool(LaunchParams calldata params, address creator, LaunchPreparation memory preparation)
         internal
         override
-        returns (address token, PoolId poolId, PoolKey memory key)
+        returns (address token, PoolId poolId, PoolKey memory key, address communityVault)
     {
         return PlaceLaunchOperations.create(
             PlaceLaunchOperations.Context({
                 hook: hook,
                 tokenDeployer: tokenDeployer,
                 admittedPolicy: _policyState.policy,
-                taxConfiguration: placeTaxConfiguration(),
                 vaultImplementation: creatorVaultImplementation,
-                vaultSettings: _vaultSettings,
+                communityVaultImplementation: communityVaultImplementation,
+                economySettings: _economySettings,
                 quoteLimits: quoteLimits[params.quoteToken]
             }),
             params,

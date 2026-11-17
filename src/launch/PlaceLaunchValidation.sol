@@ -20,6 +20,7 @@ contract PlaceLaunchValidation {
     error OutOfBounds();
     error MisalignedOffset();
     error AntiSnipeUnavailable();
+    error InvalidEconomics();
 
     struct RecipientContext {
         address factory;
@@ -75,25 +76,64 @@ contract PlaceLaunchValidation {
         _validateRecipient(protocolFeeRecipient, context);
     }
 
-    function validateLaunchTax(
-        PlaceFeeMath.TaxConfiguration memory tax,
+    /// @notice Validates a launch's economics and returns the tax configuration the hook freezes.
+    ///         Standard: every field but `xShares` zero, 1%/1%, the whole remainder to the creator.
+    ///         Economy: taxes within the policy bounds (1%..5%), baskets summing to 100%, holder threshold between
+    ///         10,000 tokens and the supply, reward fields set exactly when a reward basket is, and a rewards
+    ///         distributor configured for reward or community baskets. The reward token's route is checked by the
+    ///         distributor when it registers the streams.
+    function resolveLaunchTax(
+        PlaceLaunchFactoryCore.Economics calldata e,
         PlaceFeeMath.TaxPolicy calldata policy,
         uint256 supply,
-        bool antiSnipeEnabled
-    ) external pure {
-        PlaceFeeMath.validateTax(tax, policy, supply);
+        bool antiSnipeEnabled,
+        PlaceLaunchFactoryCore.EconomySettings calldata settings
+    ) external pure returns (PlaceFeeMath.TaxConfiguration memory tax) {
         if (antiSnipeEnabled && policy.antiSnipeConfiguration.windowSeconds == 0) revert AntiSnipeUnavailable();
+        PlaceLaunchFactoryCore.Allocation calldata a = e.allocation;
+        if (e.launchType == PlaceLaunchFactoryCore.LaunchType.Standard) {
+            if (
+                e.buyTaxRate != 0 || e.sellTaxRate != 0 || a.creator != 0 || a.holders != 0 || a.traders != 0
+                    || a.burn != 0 || a.community != 0 || e.minHolding != 0 || e.minTraderDailyVolume != 0
+                    || e.rewardToken != address(0)
+            ) revert InvalidEconomics();
+            tax.buyTaxRate = PlaceSuiteConstants.PLACE_FEE_RATE;
+            tax.sellTaxRate = PlaceSuiteConstants.PLACE_FEE_RATE;
+            tax.creatorAllocationShare = uint32(PlaceSuiteConstants.PERCENTAGE_SCALE);
+        } else {
+            tax = PlaceFeeMath.TaxConfiguration({
+                buyTaxRate: e.buyTaxRate,
+                sellTaxRate: e.sellTaxRate,
+                creatorAllocationShare: a.creator,
+                holderAllocationShare: a.holders,
+                traderAllocationShare: a.traders,
+                burnAllocationShare: a.burn,
+                communityAllocationShare: a.community
+            });
+            if (a.holders != 0) {
+                if (e.minHolding < PlaceSuiteConstants.MIN_HOLDER_REWARD_HOLDING || e.minHolding > supply) {
+                    revert InvalidEconomics();
+                }
+            } else if (e.minHolding != 0) {
+                revert InvalidEconomics();
+            }
+            if (a.traders == 0 && e.minTraderDailyVolume != 0) revert InvalidEconomics();
+            bool rewards = a.holders != 0 || a.traders != 0;
+            if (!rewards && e.rewardToken != address(0)) revert InvalidEconomics();
+            if ((rewards || a.community != 0) && settings.rewardsDistributor == address(0)) {
+                revert InvalidEconomics();
+            }
+        }
+        PlaceFeeMath.validateTax(tax, policy);
     }
 
     function previewTaxConfiguration(
         PlaceFeeMath.TaxConfiguration memory tax,
         PlaceFeeMath.TaxPolicy calldata policy,
-        uint256 supply,
         uint64 configVersion
     ) external pure returns (PlaceFeeMath.TaxConfigurationPreview memory preview) {
-        preview.dividendsEnabled = PlaceFeeMath.validateTax(tax, policy, supply);
+        PlaceFeeMath.validateTax(tax, policy);
         preview.configVersion = configVersion;
-        preview.minimumDividendHoldingRequirement = policy.minimumDividendHoldingRequirement;
         preview.buyRates = PlaceFeeMath.rates(tax.buyTaxRate, policy.protocolFeeConfiguration, tax, 0);
         preview.sellRates = PlaceFeeMath.rates(tax.sellTaxRate, policy.protocolFeeConfiguration, tax, 0);
     }
@@ -161,11 +201,11 @@ contract PlaceLaunchValidation {
 
     function validateTaxPolicy(
         PlaceFeeMath.TaxPolicy calldata policy,
-        uint256 supply,
+        uint256, // supply: no supply-bound policy fields
         address factory,
         PlaceLaunchHook hook
     ) external view {
-        PlaceFeeMath.validatePolicy(policy, supply);
+        PlaceFeeMath.validatePolicy(policy);
         _validateRecipient(
             policy.protocolFeeConfiguration.protocolFeeRecipient,
             _recipientContext(PlaceLaunchFactoryCore(factory), hook)
@@ -175,11 +215,11 @@ contract PlaceLaunchValidation {
     /// @dev Called from the factory constructor, before its getters exist, so bindings are passed explicitly.
     function validateInitialTaxPolicy(
         PlaceFeeMath.TaxPolicy calldata policy,
-        uint256 supply,
+        uint256, // supply: no supply-bound policy fields
         address factory,
         PlaceLaunchHook hook
     ) external view {
-        PlaceFeeMath.validatePolicy(policy, supply);
+        PlaceFeeMath.validatePolicy(policy);
         _validateRecipient(
             policy.protocolFeeConfiguration.protocolFeeRecipient, _initialRecipientContext(factory, hook)
         );

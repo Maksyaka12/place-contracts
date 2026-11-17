@@ -23,6 +23,7 @@ import {ICreatorRightsReceiver} from "../interfaces/ICreatorRightsReceiver.sol";
 import {ILaunchTokenMetadata} from "../interfaces/ILaunchTokenMetadata.sol";
 import {ILaunchBuyAdapter} from "../interfaces/ILaunchBuyAdapter.sol";
 import {PlaceCreatorVault} from "../place/PlaceCreatorVault.sol";
+import {IPlaceRewardsDistributor} from "../place/interfaces/IPlaceRewardsDistributor.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 /// @title PlaceLaunchFactoryCore
@@ -70,16 +71,26 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         uint64 indexed configVersion,
         PlaceFeeMath.TaxPolicy admittedPolicy,
         PlaceFeeMath.TaxConfiguration taxConfiguration,
-        address integratorFeeRecipient,
         bool antiSnipeEnabled
+    );
+    /// @notice The launch's economics, frozen at launch. `communityVault` is zero without a community basket;
+    ///         reward fields are zero without holder/trader baskets.
+    event LaunchEconomyConfigured(
+        address indexed token,
+        LaunchType indexed launchType,
+        address creatorVault,
+        address communityVault,
+        address rewardToken,
+        uint256 minHolding,
+        uint256 minTraderDailyVolume
     );
     error AntiSnipeUnavailable();
     // Raised by PlaceLaunchValidation and redeclared here so they appear in the factory ABI.
     error InvalidTaxBounds();
     error InvalidTaxConfiguration();
+    error InvalidEconomics();
 
     error InvalidProtocolFeeConfiguration();
-    error InvalidMinimumDividendHoldingRequirement();
     error InvalidFeeSchedule();
     PlaceLaunchOperations.PolicyState internal _policyState;
 
@@ -87,30 +98,35 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         return _policyState.policy;
     }
 
-    /// @notice Place: the fee rates every launch gets (no per-launch choice).
-    function previewTaxConfiguration() external view override returns (PlaceFeeMath.TaxConfigurationPreview memory) {
-        return launchValidation.previewTaxConfiguration(
-            placeTaxConfiguration(), _policyState.policy, launchSupply, configVersion
-        );
+    /// @notice The fee rates a launch with `economics` would get (validated like a launch).
+    function previewTaxConfiguration(Economics calldata economics)
+        external
+        view
+        returns (PlaceFeeMath.TaxConfigurationPreview memory)
+    {
+        PlaceFeeMath.TaxConfiguration memory tax =
+            launchValidation.resolveLaunchTax(economics, _policyState.policy, launchSupply, true, _economySettings);
+        return launchValidation.previewTaxConfiguration(tax, _policyState.policy, configVersion);
     }
 
-    /// @notice Place: the fixed per-launch fee configuration. 1% on buys and sells; the protocol cut (30% of
-    ///         the fee, see `_placePolicy`) comes off the top and the whole remainder goes to the creator side.
-    ///         No burn, dividend or integrator share.
-    function placeTaxConfiguration() public pure returns (PlaceFeeMath.TaxConfiguration memory configuration) {
+    /// @notice Standard launches: 1% on buys and sells; the protocol cut (30%) comes off the top and the whole
+    ///         remainder (0.7% of the trade) goes to the creator vault.
+    function standardTaxConfiguration() public pure returns (PlaceFeeMath.TaxConfiguration memory configuration) {
         configuration.buyTaxRate = PlaceSuiteConstants.PLACE_FEE_RATE;
         configuration.sellTaxRate = PlaceSuiteConstants.PLACE_FEE_RATE;
         configuration.creatorAllocationShare = uint32(PlaceSuiteConstants.PERCENTAGE_SCALE);
     }
 
-    /// @notice Place: the fixed policy. Only the protocol fee recipient is a parameter.
+    /// @notice Place: the fixed policy. Only the protocol fee recipient is a parameter. Buy and sell taxes are
+    ///         1%..5% each; the protocol always takes 30% of the tax (0.3%..1.5% of the trade).
     function _placePolicy(address protocolFeeRecipient) internal pure returns (PlaceFeeMath.TaxPolicy memory policy) {
-        uint32 rate = PlaceSuiteConstants.PLACE_FEE_RATE;
-        policy.taxFeeBounds = PlaceFeeMath.TaxFeeBounds(rate, rate, rate, rate);
+        uint32 low = PlaceSuiteConstants.MIN_ECONOMY_TAX_RATE;
+        uint32 high = PlaceSuiteConstants.MAX_ECONOMY_TAX_RATE;
+        policy.taxFeeBounds = PlaceFeeMath.TaxFeeBounds(low, high, low, high);
         policy.protocolFeeConfiguration = PlaceFeeMath.ProtocolFeeConfiguration({
             protocolTaxShare: PlaceSuiteConstants.PLACE_PROTOCOL_SHARE,
-            minimumProtocolFeeRate: PlaceSuiteConstants.PLACE_PROTOCOL_FEE_RATE,
-            maximumProtocolFeeRate: PlaceSuiteConstants.PLACE_PROTOCOL_FEE_RATE,
+            minimumProtocolFeeRate: PlaceSuiteConstants.PLACE_MIN_PROTOCOL_FEE_RATE,
+            maximumProtocolFeeRate: PlaceSuiteConstants.PLACE_MAX_PROTOCOL_FEE_RATE,
             protocolFeeRecipient: protocolFeeRecipient
         });
         policy.antiSnipeConfiguration = PlaceFeeMath.AntiSnipeConfiguration({
@@ -165,46 +181,77 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         uint64 expectedConfigVersion;
         uint64 deadline;
         bool metadataEditable;
+        bool antiSnipeEnabled;
         string[] metadataKeys;
         string[] metadataValues;
         Economics economics;
     }
 
-    /// @notice Place: launch economics. Three baskets of the creator's 70%, in bps:
-    ///         `burnBps` (buyback to 0x…dEaD), `communityBps` (community fund); `xShares` split what remains and
-    ///         the creator keeps the rest. Frozen in the launch's PlaceCreatorVault (can only go up later).
+    enum LaunchType {
+        Standard,
+        Economy
+    }
+
+    /// @notice The five Economy baskets, in PERCENTAGE_SCALE (1e8 = 100%) of the tax left after the platform's
+    ///         30%. They sum to 100%.
+    struct Allocation {
+        uint32 creator;
+        uint32 holders;
+        uint32 traders;
+        uint32 burn;
+        uint32 community;
+    }
+
+    /// @notice Launch economics, frozen at launch.
+    ///         - Standard: 1% per swap, 0.3% to the platform, 0.7% to the creator vault. Every field except
+    ///           `xShares` must be zero.
+    ///         - Economy: `buyTaxRate` and `sellTaxRate` 1%..5% each (PERCENTAGE_SCALE units); the platform takes 30%
+    ///           of the tax; the rest is split by `allocation`. Holders need `minHolding` (10,000 tokens .. supply);
+    ///           traders `minTraderDailyVolume` (quote units per day); both are paid in `rewardToken` (the quote,
+    ///           this launch's token at its predicted address, or a reward-token registry route target).
+    ///         `xShares` split the creator allocation with X accounts (bps of it) in either type.
     struct Economics {
-        uint16 burnBps;
-        uint16 communityBps;
+        LaunchType launchType;
+        uint32 buyTaxRate;
+        uint32 sellTaxRate;
+        Allocation allocation;
+        uint256 minHolding;
+        uint256 minTraderDailyVolume;
+        address rewardToken;
         PlaceCreatorVault.XShare[] xShares;
     }
 
-    /// @notice Place: settings every new vault copies (future launches only; each vault freezes its copy).
-    struct VaultSettings {
-        address hub;
+    /// @notice Place: contracts and defaults new launches use (future launches only; each launch freezes its copy).
+    struct EconomySettings {
         address xRegistry;
         address staking;
         address rewardRegistry;
-        uint64 processInterval;
+        address rewardsDistributor;
         uint64 defaultCampaignDelay;
-        bytes32 rulesHash;
-        string rulesURI;
+        uint64 defaultCampaignEpochs;
     }
 
-    /// @notice Place: per-quote limits every new vault copies.
+    /// @notice Place: per-quote limits every new community vault copies.
     struct QuoteLimits {
-        uint128 maxBurnPerProcess;
         uint128 defaultCampaignMinimum;
     }
 
-    /// @notice Place: clone template of PlaceCreatorVault.
-    address public immutable creatorVaultImplementation;
-    VaultSettings internal _vaultSettings;
-    /// @notice Place: burn cap per `process()` and default campaign minimum, per quote (frozen into each vault).
-    mapping(address quoteToken => QuoteLimits limits) public quoteLimits;
+    struct LaunchRecord {
+        LaunchType launchType;
+        address communityVault;
+    }
 
-    event VaultSettingsUpdated(VaultSettings settings);
-    event QuoteLimitsUpdated(address indexed quoteToken, uint128 maxBurnPerProcess, uint128 defaultCampaignMinimum);
+    /// @notice Place: clone templates of PlaceCreatorVault and PlaceCommunityVault.
+    address public immutable creatorVaultImplementation;
+    address public immutable communityVaultImplementation;
+    EconomySettings internal _economySettings;
+    /// @notice Place: default campaign minimum per quote (frozen into each community vault).
+    mapping(address quoteToken => QuoteLimits limits) public quoteLimits;
+    /// @notice Place: type and community vault of each launch.
+    mapping(address token => LaunchRecord record) public launchRecord;
+
+    event EconomySettingsUpdated(EconomySettings settings);
+    event QuoteLimitsUpdated(address indexed quoteToken, uint128 defaultCampaignMinimum);
 
     struct LaunchBuyParams {
         address fundingToken;
@@ -222,6 +269,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         int24 spacing;
         int24 startTick;
         PlaceLaunchHook.SeedPosition[] seedPositions;
+        PlaceFeeMath.TaxConfiguration taxConfiguration;
     }
 
     event QuoteRegistered(address indexed quoteToken, uint8 quoteDecimals, int24 startTickToken0Frame, uint64 revision);
@@ -316,6 +364,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         address protocolFeeRecipient;
         Band[] bandTemplate;
         address creatorVaultImplementation;
+        address communityVaultImplementation;
     }
 
     constructor(
@@ -330,8 +379,12 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         ) revert InvalidConfig();
         poolManager = poolManagerAddress;
         hook = launchHook;
-        if (initialFactoryConfiguration.creatorVaultImplementation.code.length == 0) revert InvalidConfig();
+        if (
+            initialFactoryConfiguration.creatorVaultImplementation.code.length == 0
+                || initialFactoryConfiguration.communityVaultImplementation.code.length == 0
+        ) revert InvalidConfig();
         creatorVaultImplementation = initialFactoryConfiguration.creatorVaultImplementation;
+        communityVaultImplementation = initialFactoryConfiguration.communityVaultImplementation;
         launchValidation = new PlaceLaunchValidation();
         _setLaunchSupply(initialFactoryConfiguration.launchSupply);
         _applyTickSpacing(initialFactoryConfiguration.tickSpacing);
@@ -414,7 +467,8 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         address originalCreator,
         LaunchPreparation memory preparation
     ) internal returns (address token, PoolId poolId, PoolKey memory poolKey) {
-        (token, poolId, poolKey) = _createLaunchPool(launchParams, originalCreator, preparation);
+        address communityVault;
+        (token, poolId, poolKey, communityVault) = _createLaunchPool(launchParams, originalCreator, preparation);
 
         _creatorRights[token] = CreatorRights({
             originalCreator: originalCreator,
@@ -424,10 +478,20 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
             poolId: poolId,
             metadataEditable: launchParams.metadataEditable
         });
+        Economics calldata e = launchParams.economics;
+        launchRecord[token] = LaunchRecord({launchType: e.launchType, communityVault: communityVault});
 
         AnnouncementRegistry(announcementRegistry).registerToken(token);
         emit LaunchTaxConfigured(
-            poolId, token, configVersion, _policyState.policy, placeTaxConfiguration(), address(0), true
+            poolId,
+            token,
+            configVersion,
+            _policyState.policy,
+            preparation.taxConfiguration,
+            launchParams.antiSnipeEnabled
+        );
+        emit LaunchEconomyConfigured(
+            token, e.launchType, preparation.vault, communityVault, e.rewardToken, e.minHolding, e.minTraderDailyVolume
         );
         emit Launched(token, poolId, originalCreator, launchParams.quoteToken, preparation.supply, preparation.spacing);
     }
@@ -451,8 +515,10 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
             if (bytes(launchParams.metadataKeys[i]).length == 0) revert InvalidConfig();
         }
 
-        // Place: fixed fee configuration, anti-snipe always on, no integrator (no referrals yet).
-        launchValidation.validateLaunchTax(placeTaxConfiguration(), _policyState.policy, launchSupply, true);
+        // Place: Standard (fixed 1%) or Economy (validated taxes and baskets); no integrator (no referrals yet).
+        preparation.taxConfiguration = launchValidation.resolveLaunchTax(
+            launchParams.economics, _policyState.policy, launchSupply, launchParams.antiSnipeEnabled, _economySettings
+        );
         _beforeCreateLaunch(launchParams);
 
         preparation.supply = launchSupply;
@@ -494,7 +560,7 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
     function _createLaunchPool(LaunchParams calldata params, address creator, LaunchPreparation memory preparation)
         internal
         virtual
-        returns (address token, PoolId poolId, PoolKey memory poolKey);
+        returns (address token, PoolId poolId, PoolKey memory poolKey, address communityVault);
 
     function _validatePredictedToken(address) internal view virtual {}
 
@@ -775,23 +841,28 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
         emit LaunchBuyAdapterUpdated(previousAdapter, newLaunchBuyAdapter);
     }
 
-    /// @notice Place: hub, staking, reward-token registry, X registry, cadence and campaign rules that new vaults
-    ///         copy. The vault validates them at launch.
-    function setVaultSettings(VaultSettings calldata settings) external onlyOwner nonReentrant {
-        _vaultSettings = settings;
+    /// @notice Place: X registry, staking, reward-token registry, rewards distributor and default campaign that new
+    ///         launches use. The distributor must be bound to this factory.
+    function setEconomySettings(EconomySettings calldata settings) external onlyOwner nonReentrant {
+        if (
+            settings.rewardsDistributor != address(0)
+                && (settings.rewardsDistributor.code.length == 0
+                    || IPlaceRewardsDistributor(settings.rewardsDistributor).factory() != address(this))
+        ) revert InvalidConfig();
+        _economySettings = settings;
         _bumpConfigVersion();
-        emit VaultSettingsUpdated(settings);
+        emit EconomySettingsUpdated(settings);
     }
 
-    /// @notice Place: per-quote burn cap and default campaign minimum for new vaults (e.g. 0.01 / 0.05 ETH).
+    /// @notice Place: per-quote default campaign minimum for new community vaults (e.g. 0.05 ETH).
     function setQuoteLimits(address quoteToken, QuoteLimits calldata limits) external onlyOwner nonReentrant {
         quoteLimits[quoteToken] = limits;
         _bumpConfigVersion();
-        emit QuoteLimitsUpdated(quoteToken, limits.maxBurnPerProcess, limits.defaultCampaignMinimum);
+        emit QuoteLimitsUpdated(quoteToken, limits.defaultCampaignMinimum);
     }
 
-    function vaultSettings() external view returns (VaultSettings memory) {
-        return _vaultSettings;
+    function economySettings() external view returns (EconomySettings memory) {
+        return _economySettings;
     }
 
     function setNativeLaunchFee(uint256 newNativeLaunchFee) external onlyOwner nonReentrant {
@@ -808,9 +879,6 @@ abstract contract PlaceLaunchFactoryCore is Ownable2Step, ReentrancyGuard, IPlac
 
     function _setLaunchSupply(uint256 supply) internal {
         if (supply < MIN_SUPPLY || supply > MAX_SUPPLY) revert OutOfBounds();
-        if (_policyState.policy.minimumDividendHoldingRequirement > supply) {
-            revert InvalidMinimumDividendHoldingRequirement();
-        }
         emit LaunchSupplyUpdated(launchSupply, supply);
         launchSupply = supply;
     }

@@ -68,7 +68,7 @@ contract LaunchB20ForkTest is LaunchFixture {
     function test_b20_swaps_feesSplit() public {
         (address token,) = _launch(_params(PlaceLaunchFactoryCore.TokenKind.B20, address(0)));
         PoolKey memory key = _poolKey(token, address(0));
-        vm.warp(block.timestamp + 21);
+        vm.warp(vm.getBlockTimestamp() + 21);
         _swap(TRADER, key, token, true, 0.1 ether);
         assertEq(escrow.owed(PLATFORM, address(0)), 0.0003 ether);
         assertEq(escrow.owed(address(_vault(token)), address(0)), 0.0007 ether);

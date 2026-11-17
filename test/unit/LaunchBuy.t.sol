@@ -5,35 +5,19 @@ import {LaunchFixture} from "../utils/LaunchFixture.sol";
 import {PlaceLaunchFactoryCore} from "../../src/launch/PlaceLaunchFactoryCore.sol";
 import {PlaceLaunchBuyAdapter} from "../../src/place/PlaceLaunchBuyAdapter.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {PoolId} from "v4-core/src/types/PoolId.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
-import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {PoolModifyLiquidityTest} from "v4-core/src/test/PoolModifyLiquidityTest.sol";
-import {MockERC20} from "v4-core/lib/solmate/src/test/utils/mocks/MockERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract LaunchBuyTest is LaunchFixture {
     PlaceLaunchBuyAdapter internal adapter;
-    MockERC20 internal usd;
-    PoolKey internal ethUsd;
 
     function setUp() public {
         _deploySuite(IPoolManager(address(0)));
         adapter = new PlaceLaunchBuyAdapter(address(factory), address(hook), address(pm));
         factory.setLaunchBuyAdapter(address(adapter));
 
-        // A plain v4 ETH/USD pool (no hook) for the ETH -> USD -> token route; 1 ETH = ~2000 USD.
-        usd = new MockERC20("USD", "USD", 18);
+        // USD quote; the fixture's plain v4 ETH/USD pool serves the ETH -> USD -> token route.
         factory.registerQuote(address(usd), -124_200);
-        ethUsd = PoolKey(Currency.wrap(address(0)), Currency.wrap(address(usd)), 3000, 60, IHooks(address(0)));
-        pm.initialize(ethUsd, TickMath.getSqrtPriceAtTick(76_020));
-        PoolModifyLiquidityTest lp = new PoolModifyLiquidityTest(pm);
-        usd.mint(address(this), 1_000_000e18);
-        usd.approve(address(lp), type(uint256).max);
-        vm.deal(address(this), 100 ether);
-        lp.modifyLiquidity{value: 50 ether}(ethUsd, IPoolManager.ModifyLiquidityParams(-887_220, 887_220, 1e21, 0), "");
     }
 
     function _launchAndBuy(
@@ -101,8 +85,6 @@ contract LaunchBuyTest is LaunchFixture {
             })
         );
     }
-
-    receive() external payable {}
 
     function test_adapter_onlyHook() public {
         PlaceLaunchBuyAdapter.LaunchBuyRequest memory r;

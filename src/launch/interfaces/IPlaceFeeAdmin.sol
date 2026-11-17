@@ -3,13 +3,11 @@ pragma solidity 0.8.26;
 
 import {PlaceFeeMath} from "../PlaceFeeMath.sol";
 
-/// @notice Owner controls for the swap fee policy. Place fixes the rates (1% fee, 30% of it to the protocol,
-///         the rest to the creator side, 99% -> 1% anti-snipe over 20 s); only the protocol fee recipient can
-///         change, and only for future launches. The former setTaxPolicy / setTaxFeeBounds /
-///         setProtocolFeeConfiguration / setAntiSnipeConfiguration / setMinimumDividendHoldingRequirement are removed.
+/// @notice Owner controls for the swap fee policy. Place fixes the rates (Standard 1%; Economy 1%..5% per side;
+///         30% of the tax to the protocol, at least 0.3% and at most 1.5% of the swap; 99% -> tax anti-snipe over
+///         20 s). Only the protocol fee recipient can change, and only for future launches.
 interface IPlaceFeeAdmin {
     event TaxPolicyUpdated(uint64 indexed configVersion, PlaceFeeMath.TaxPolicy policy);
     function setProtocolFeeRecipient(address protocolFeeRecipient) external;
     function taxPolicy() external view returns (PlaceFeeMath.TaxPolicy memory);
-    function previewTaxConfiguration() external view returns (PlaceFeeMath.TaxConfigurationPreview memory);
 }

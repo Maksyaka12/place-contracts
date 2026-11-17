@@ -27,7 +27,7 @@ contract LaunchERC20Test is LaunchFixture {
     function test_fees_afterAntiSnipe_split70_30() public {
         (address token,) = _launch(_params(PlaceLaunchFactoryCore.TokenKind.ERC20, address(0)));
         PoolKey memory key = _poolKey(token, address(0));
-        vm.warp(block.timestamp + 21);
+        vm.warp(vm.getBlockTimestamp() + 21);
         _swap(TRADER, key, token, true, 1 ether);
         assertEq(escrow.owed(PLATFORM, address(0)), 0.003 ether, "platform 0.3%");
         assertEq(escrow.owed(address(_vault(token)), address(0)), 0.007 ether, "creator 0.7%");

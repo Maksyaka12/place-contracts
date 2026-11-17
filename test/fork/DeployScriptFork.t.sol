@@ -11,7 +11,6 @@ contract DeployScriptForkTest is Test {
         vm.createSelectFork(vm.envOr("BASE_RPC_URL", string("https://base-rpc.publicnode.com")));
         vm.setEnv("POOL_MANAGER", "0x498581fF718922c3f8e6A244956aF099B2652b2b");
         vm.setEnv("PROTOCOL_FEE_RECIPIENT", "0x0000000000000000000000000000000000009A7F");
-        vm.setEnv("PLACE_HUB", "0x0000000000000000000000000000000000000000");
         vm.setEnv("ENABLE_LAUNCHES", "true");
         vm.setEnv("SENDER", "0x00000000000000000000000000000000000D3910");
         DeployPlaceLaunch deploy = new DeployPlaceLaunch();
@@ -22,8 +21,13 @@ contract DeployScriptForkTest is Test {
         assertEq(d.factory.launchBuyAdapter(), address(d.adapter));
         assertEq(d.factory.nativeLaunchFee(), 0.0005 ether);
         assertEq(d.factory.taxPolicy().protocolFeeConfiguration.protocolTaxShare, 30_000_000);
-        assertEq(d.factory.vaultSettings().staking, address(d.staking));
-        assertEq(d.factory.vaultSettings().rewardRegistry, address(d.rewardRegistry));
+        assertEq(d.factory.economySettings().staking, address(d.staking));
+        assertEq(d.factory.economySettings().rewardRegistry, address(d.rewardRegistry));
+        assertEq(d.factory.economySettings().rewardsDistributor, address(d.distributor));
+        assertEq(d.factory.economySettings().defaultCampaignEpochs, 30);
+        assertEq(d.distributor.factory(), address(d.factory));
+        assertEq(d.distributor.streamFeeBps(), 500);
+        assertEq(d.factory.communityVaultImplementation(), address(d.communityVaultImplementation));
         (uint16 stakingFee,,) = d.staking.feeConfig();
         assertEq(stakingFee, 500);
         assertEq(d.rewardRegistry.maxPriceImpactBps(), 100);

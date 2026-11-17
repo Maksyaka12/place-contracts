@@ -32,9 +32,10 @@ interface IWiredFactory {
 ///         - gates pool creation to the launchpad factory (`beforeInitialize`),
 ///         - blocks all third-party liquidity adds/removes, and owns the permanently locked
 ///           single-sided genesis-band positions (no code path ever passes a negative liquidityDelta),
-///         - on every swap takes a fee on the quote currency as an ERC-6909 claim minted to the
-///           FeeEscrow, split into inclusive protocol and remainder allocations; temporary anti-sniping
-///           surcharge goes to the frozen protocol recipient. Burn credits redeem later to the fixed sink.
+///         - on every swap takes the launch's buy or sell tax as ERC-6909 claims minted to the FeeEscrow:
+///           the protocol cut, then the creator, holder, trader and community allocations in the quote, and the
+///           burn allocation in the launched token; temporary anti-sniping surcharge goes to the frozen
+///           protocol recipient. Burn credits redeem later to the fixed sink (`FeeEscrow.burn`).
 /// @dev    One deployment, reused by all launches; per-pool economics are frozen at launch in `poolConfig`.
 ///         Deployed at a CREATE2-mined address whose low 14 bits equal `getHookPermissions()` (BaseHook
 ///         validates this in the constructor). Fee custody lives in the FeeEscrow, not here.
@@ -61,7 +62,8 @@ contract PlaceLaunchHook is BaseHook, Initializable {
         PlaceFeeMath.AntiSnipeConfiguration antiSnipeConfiguration;
         uint48 launchTime;
         bool antiSnipeEnabled;
-        address integratorFeeRecipient;
+        address rewardsDistributor;
+        address communityVault;
         PlaceFeeMath.TaxConfiguration taxConfiguration;
     }
 
@@ -69,7 +71,8 @@ contract PlaceLaunchHook is BaseHook, Initializable {
         address token;
         address creator;
         address creatorFeeRecipient;
-        address integratorFeeRecipient;
+        address rewardsDistributor;
+        address communityVault;
         uint48 launchTime;
         bool antiSnipeEnabled;
         PlaceFeeMath.TaxPolicy admittedPolicy;
@@ -135,9 +138,12 @@ contract PlaceLaunchHook is BaseHook, Initializable {
 
     event BurnTaxCredited(PoolId indexed poolId, address indexed token, address indexed sink, uint256 amount);
     event CreatorTaxCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
-    event IntegratorAttributed(PoolId indexed poolId, address indexed integratorFeeRecipient);
     event ProtocolFeeCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
-    event IntegratorTaxCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
+    /// @notice Holder or trader reward allocation, kept in the FeeEscrow under the launch's stream `account`.
+    event RewardTaxCredited(
+        PoolId indexed poolId, address indexed distributor, bytes32 indexed account, address currency, uint256 amount
+    );
+    event CommunityTaxCredited(PoolId indexed poolId, address indexed vault, address currency, uint256 amount);
     event AntiSnipeFeeCredited(PoolId indexed poolId, address indexed recipient, address currency, uint256 amount);
     event Wired(address indexed factory, address indexed feeEscrow);
     event PoolRegistered(PoolId indexed poolId, address indexed originalCreator, address indexed creatorFeeRecipient);
@@ -150,13 +156,16 @@ contract PlaceLaunchHook is BaseHook, Initializable {
     );
     event Seeded(PoolId indexed poolId, uint256 tokenAmountSeeded);
     /// @notice One record per successful registered-pool swap, including zero rounded quote fees.
-    /// @dev quoteCurrency/quoteFeeAmount cover quote fees only; BurnTaxCredited records launched-token allocation.
-    ///      `referrer` is always zero and remains for event compatibility.
+    /// @dev `executor` is the contract that called the PoolManager (a router, a vault); `trader` is the transaction
+    ///      sender. `quoteVolume` is the quote amount that moved through the pool; quoteCurrency/quoteFeeAmount
+    ///      cover quote fees only (BurnTaxCredited records the launched-token allocation).
     event Trade(
         PoolId indexed poolId,
         address indexed executor,
-        address indexed referrer,
+        address indexed trader,
+        bool isBuy,
         address quoteCurrency,
+        uint256 quoteVolume,
         uint256 quoteFeeAmount,
         bytes32 comment
     );
@@ -237,10 +246,10 @@ contract PlaceLaunchHook is BaseHook, Initializable {
             antiSnipeConfiguration: registration.admittedPolicy.antiSnipeConfiguration,
             launchTime: registration.launchTime,
             antiSnipeEnabled: registration.antiSnipeEnabled,
-            integratorFeeRecipient: registration.integratorFeeRecipient,
+            rewardsDistributor: registration.rewardsDistributor,
+            communityVault: registration.communityVault,
             taxConfiguration: registration.taxConfiguration
         });
-        emit IntegratorAttributed(poolId, registration.integratorFeeRecipient);
         emit PoolRegistered(poolId, registration.creator, registration.creatorFeeRecipient);
     }
 
@@ -467,7 +476,18 @@ contract PlaceLaunchHook is BaseHook, Initializable {
         if (quoteFee != 0) {
             poolManager.mint(feeEscrow, quoteCurrency.toId(), quoteFee);
         }
-        _creditTax(cfg, quoteCurrency, quoteFee, rate, hookData, poolId, sender);
+        emit Trade(
+            poolId,
+            sender,
+            // forge-lint: disable-next-line(tx-origin) attribution of trader volume only, never authorization
+            tx.origin,
+            isBuy,
+            Currency.unwrap(quoteCurrency),
+            _quoteMagnitude(delta, cfg.tokenIsCurrency0),
+            quoteFee,
+            _parseComment(hookData)
+        );
+        _creditTax(cfg, quoteCurrency, quoteFee, rate, poolId);
         if (burnFee != 0) {
             Currency tokenCurrency = key.currency1;
             if (cfg.tokenIsCurrency0) tokenCurrency = key.currency0;
@@ -482,45 +502,63 @@ contract PlaceLaunchHook is BaseHook, Initializable {
 
     // ---- fee internals ----
 
+    /// @dev Credits the quote fee: protocol cut and surcharge to the frozen protocol recipient, creator share to
+    ///      the creator vault, holder and trader shares to the rewards distributor's per-launch accounts, community
+    ///      share to the community vault.
     function _creditTax(
         PoolConfig memory cfg,
         Currency currency,
         uint256 amount,
         PlaceFeeMath.Rates memory rate,
-        bytes calldata hookData,
-        PoolId poolId,
-        address sender
+        PoolId poolId
     ) internal {
-        emit Trade(poolId, sender, address(0), Currency.unwrap(currency), amount, _parseComment(hookData));
         if (amount == 0) return;
-        (
-            uint256 protocolAmount,
-            uint256 surchargeAmount,
-            uint256 creatorAmount,
-            uint256 dividendAmount,
-            uint256 integratorAmount
-        ) = PlaceFeeMath.splitQuoteFee(amount, rate);
+        PlaceFeeMath.QuoteSplit memory s = PlaceFeeMath.splitQuoteFee(amount, rate);
         FeeEscrow escrow = FeeEscrow(feeEscrow);
         address asset = Currency.unwrap(currency);
         address protocolRecipient = cfg.protocolFeeConfiguration.protocolFeeRecipient;
-        if (protocolAmount != 0) {
-            escrow.credit(protocolRecipient, asset, protocolAmount);
-            emit ProtocolFeeCredited(poolId, protocolRecipient, asset, protocolAmount);
+        if (s.protocolAmount != 0) {
+            escrow.credit(protocolRecipient, asset, s.protocolAmount);
+            emit ProtocolFeeCredited(poolId, protocolRecipient, asset, s.protocolAmount);
         }
-        if (surchargeAmount != 0) {
-            escrow.credit(protocolRecipient, asset, surchargeAmount);
-            emit AntiSnipeFeeCredited(poolId, protocolRecipient, asset, surchargeAmount);
+        if (s.surchargeAmount != 0) {
+            escrow.credit(protocolRecipient, asset, s.surchargeAmount);
+            emit AntiSnipeFeeCredited(poolId, protocolRecipient, asset, s.surchargeAmount);
         }
-        if (creatorAmount != 0) {
-            escrow.credit(cfg.creatorFeeRecipient, asset, creatorAmount);
-            emit CreatorTaxCredited(poolId, cfg.creatorFeeRecipient, asset, creatorAmount);
+        if (s.creatorAmount != 0) {
+            escrow.credit(cfg.creatorFeeRecipient, asset, s.creatorAmount);
+            emit CreatorTaxCredited(poolId, cfg.creatorFeeRecipient, asset, s.creatorAmount);
         }
-        // Place: no dividends. Registration rejects a nonzero dividend share, so this amount is always zero.
-        if (dividendAmount != 0) revert BadWiring();
-        if (integratorAmount != 0) {
-            escrow.credit(cfg.integratorFeeRecipient, asset, integratorAmount);
-            emit IntegratorTaxCredited(poolId, cfg.integratorFeeRecipient, asset, integratorAmount);
+        if (s.holderAmount != 0) {
+            _creditReward(escrow, cfg, PlaceSuiteConstants.STREAM_HOLDERS, asset, s.holderAmount, poolId);
         }
+        if (s.traderAmount != 0) {
+            _creditReward(escrow, cfg, PlaceSuiteConstants.STREAM_TRADERS, asset, s.traderAmount, poolId);
+        }
+        if (s.communityAmount != 0) {
+            escrow.credit(cfg.communityVault, asset, s.communityAmount);
+            emit CommunityTaxCredited(poolId, cfg.communityVault, asset, s.communityAmount);
+        }
+    }
+
+    function _creditReward(
+        FeeEscrow escrow,
+        PoolConfig memory cfg,
+        uint8 kind,
+        address asset,
+        uint256 amount,
+        PoolId poolId
+    ) internal {
+        bytes32 account = PlaceSuiteConstants.economyStreamId(cfg.token, kind);
+        escrow.creditAccount(cfg.rewardsDistributor, account, asset, amount);
+        emit RewardTaxCredited(poolId, cfg.rewardsDistributor, account, asset, amount);
+    }
+
+    /// @dev Absolute quote-side amount of the pool's swap delta.
+    function _quoteMagnitude(BalanceDelta delta, bool tokenIsCurrency0) internal pure returns (uint256) {
+        int128 amount = tokenIsCurrency0 ? delta.amount1() : delta.amount0();
+        // forge-lint: disable-next-line(unsafe-typecast) widened before negation, the result is non-negative
+        return amount < 0 ? uint256(-int256(amount)) : uint256(int256(amount));
     }
 
     function _quoteCurrencyAndSpecified(
@@ -655,21 +693,20 @@ contract PlaceLaunchHook is BaseHook, Initializable {
     }
 
     function _validateRegistration(PoolRegistration calldata registration) internal view {
-        bool enabled = PlaceFeeMath.validateTax(
-            registration.taxConfiguration, registration.admittedPolicy, IERC20(registration.token).totalSupply()
-        );
+        PlaceFeeMath.TaxConfiguration calldata tax = registration.taxConfiguration;
+        PlaceFeeMath.validateTax(tax, registration.admittedPolicy);
         if (registration.antiSnipeEnabled && registration.admittedPolicy.antiSnipeConfiguration.windowSeconds == 0) {
             revert AntiSnipeUnavailable();
         }
-        // Place: `enabled` means a dividend share, which Place never admits.
-        if (enabled || registration.creator == address(0)) revert InvalidFeeConfig();
+        if (registration.creator == address(0)) revert InvalidFeeConfig();
         _validateConfiguredFeeRecipient(registration.creatorFeeRecipient);
         _validateConfiguredFeeRecipient(registration.admittedPolicy.protocolFeeConfiguration.protocolFeeRecipient);
-        if (registration.integratorFeeRecipient != address(0)) {
-            _validateConfiguredFeeRecipient(registration.integratorFeeRecipient);
-        } else if (registration.taxConfiguration.integratorAllocationShare != 0) {
-            revert InvalidFeeConfig();
-        }
+        // A recipient is wired exactly when its allocation is nonzero.
+        bool rewards = tax.holderAllocationShare != 0 || tax.traderAllocationShare != 0;
+        if (rewards) _validateConfiguredFeeRecipient(registration.rewardsDistributor);
+        else if (registration.rewardsDistributor != address(0)) revert InvalidFeeConfig();
+        if (tax.communityAllocationShare != 0) _validateConfiguredFeeRecipient(registration.communityVault);
+        else if (registration.communityVault != address(0)) revert InvalidFeeConfig();
     }
 
     function _validateConfiguredFeeRecipient(address configuredRecipient) internal view {

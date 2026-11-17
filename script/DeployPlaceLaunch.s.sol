@@ -13,29 +13,31 @@ import {PlaceLaunchTokenDeployer} from "../src/launch/PlaceLaunchTokenDeployer.s
 import {FeeEscrow} from "../src/FeeEscrow.sol";
 import {AnnouncementRegistry} from "../src/AnnouncementRegistry.sol";
 import {PlaceCreatorVault} from "../src/place/PlaceCreatorVault.sol";
+import {PlaceCommunityVault} from "../src/place/PlaceCommunityVault.sol";
+import {PlaceRewardsDistributor} from "../src/place/PlaceRewardsDistributor.sol";
 import {XRecipientRegistry} from "../src/place/XRecipientRegistry.sol";
 import {PlaceLaunchBuyAdapter} from "../src/place/PlaceLaunchBuyAdapter.sol";
 import {PlaceRewardTokenRegistry} from "../src/place/PlaceRewardTokenRegistry.sol";
 import {PlaceStaking} from "../src/staking/PlaceStaking.sol";
 
-/// @notice Deploys and wires the whole Place Launch suite (stage L2, economy of stage L5).
+/// @notice Deploys and wires the whole Place Launch suite: Standard and Economy launches, creator and community
+///         vaults, the rewards distributor, the reward-token registry and staking.
 ///
 ///   forge script script/DeployPlaceLaunch.s.sol --rpc-url base_sepolia --account <keystore> \
 ///     --sender <address> --broadcast --non-interactive
 ///
 /// Settings come from the environment (no private keys: sign with --account / --ledger):
 ///   POOL_MANAGER            Uniswap v4 PoolManager (Base Sepolia 0x05E7…3408, Base 0x4985…2b2b)
-///   PROTOCOL_FEE_RECIPIENT  platform fee + anti-snipe + launch fee recipient (Safe on mainnet)
-///   PLACE_HUB               PlaceHub for community fund campaigns (0 = community fund off for new launches)
+///   PROTOCOL_FEE_RECIPIENT  platform fee + anti-snipe + launch fee + stream fee recipient (Safe on mainnet)
+///   REWARDS_PUBLISHER       hot wallet that posts the daily reward roots (0 = none yet)
 ///   X_VERIFIER              signer of X bindings (0 = bindings paused)
 ///   FINAL_OWNER             optional: Safe that must acceptOwnership of factory, X registry, reward-token
-///                           registry and staking
-///   RULES_URI, RULES_HASH   holder campaign rules (required when PLACE_HUB is set)
+///                           registry, rewards distributor and staking
 ///   PLACE_STAKING           existing PlaceStaking (default: deploy one, fee STAKING_FEE_BPS, default 500 = 5%)
-///   MAX_PRICE_IMPACT_BPS    per-hop cap of fund swaps in the reward-token registry, default 100 (1%)
-///   PROCESS_INTERVAL        seconds between burns, default 1 day
-///   DEFAULT_CAMPAIGN_DELAY  idle fund -> default campaign, default 30 days
-///   ETH_MAX_BURN            burn cap per process() in ETH, default 0.01 ether
+///   STREAM_FEE_BPS          fee on funded reward streams, default 500 (5%)
+///   MAX_PRICE_IMPACT_BPS    per-hop cap of reward and fund swaps in the reward-token registry, default 100 (1%)
+///   DEFAULT_CAMPAIGN_DELAY  idle community fund -> default holders campaign, default 30 days
+///   DEFAULT_CAMPAIGN_EPOCHS daily epochs of the default campaign, default 30
 ///   ETH_DEFAULT_MINIMUM     default campaign minimum in ETH, default 0.05 ether
 ///   ETH_START_TICK          default -200600 (~ $4k FDV)
 ///   ENABLE_LAUNCHES         default false
@@ -56,6 +58,8 @@ contract DeployPlaceLaunch is Script {
         FeeEscrow escrow;
         AnnouncementRegistry announcements;
         PlaceCreatorVault vaultImplementation;
+        PlaceCommunityVault communityVaultImplementation;
+        PlaceRewardsDistributor distributor;
         XRecipientRegistry xRegistry;
         PlaceLaunchBuyAdapter adapter;
         PlaceRewardTokenRegistry rewardRegistry;
@@ -65,7 +69,6 @@ contract DeployPlaceLaunch is Script {
     function run() external returns (Deployed memory d) {
         IPoolManager pm = IPoolManager(vm.envAddress("POOL_MANAGER"));
         address protocolRecipient = vm.envAddress("PROTOCOL_FEE_RECIPIENT");
-        address hub = vm.envOr("PLACE_HUB", address(0));
         address xVerifier = vm.envOr("X_VERIFIER", address(0));
         address finalOwner = vm.envOr("FINAL_OWNER", address(0));
         address deployer = vm.envOr("SENDER", msg.sender); // = --sender; SENDER lets tests pick one
@@ -83,8 +86,9 @@ contract DeployPlaceLaunch is Script {
         d.hook = new PlaceLaunchHook{salt: hookSalt}(pm, deployer);
         require(address(d.hook) == hookAddress, "hook address");
 
-        // 2. Factory with its token deployer and vault template.
+        // 2. Factory with its token deployer and vault templates.
         d.vaultImplementation = new PlaceCreatorVault();
+        d.communityVaultImplementation = new PlaceCommunityVault();
         d.tokenDeployer = new PlaceLaunchTokenDeployer(deployer);
         PlaceLaunchFactoryCore.Band[] memory bands = new PlaceLaunchFactoryCore.Band[](1);
         bands[0] = PlaceLaunchFactoryCore.Band({lowerOffset: 0, upperOffset: type(int24).max, supplyShareBps: 10_000});
@@ -97,7 +101,8 @@ contract DeployPlaceLaunch is Script {
                 tickSpacing: TICK_SPACING,
                 protocolFeeRecipient: protocolRecipient,
                 bandTemplate: bands,
-                creatorVaultImplementation: address(d.vaultImplementation)
+                creatorVaultImplementation: address(d.vaultImplementation),
+                communityVaultImplementation: address(d.communityVaultImplementation)
             })
         );
 
@@ -108,7 +113,7 @@ contract DeployPlaceLaunch is Script {
         d.announcements = new AnnouncementRegistry(address(d.factory));
         d.factory.setAnnouncementRegistry(address(d.announcements));
 
-        // 4. Place additions: X registry, dev-buy adapter, economy (staking, reward-token registry), vault settings.
+        // 4. Place additions: X registry, dev-buy adapter, staking, reward-token registry, rewards distributor.
         d.xRegistry = new XRecipientRegistry(deployer, xVerifier);
         d.adapter = new PlaceLaunchBuyAdapter(address(d.factory), address(d.hook), address(pm));
         d.factory.setLaunchBuyAdapter(address(d.adapter));
@@ -118,24 +123,28 @@ contract DeployPlaceLaunch is Script {
             : new PlaceStaking(deployer, uint16(vm.envOr("STAKING_FEE_BPS", uint256(500))), protocolRecipient);
         d.rewardRegistry =
             new PlaceRewardTokenRegistry(deployer, uint16(vm.envOr("MAX_PRICE_IMPACT_BPS", uint256(100))));
+        d.distributor = new PlaceRewardsDistributor(
+            address(d.factory),
+            deployer,
+            vm.envOr("REWARDS_PUBLISHER", address(0)),
+            uint16(vm.envOr("STREAM_FEE_BPS", uint256(500))),
+            protocolRecipient
+        );
         d.factory
-            .setVaultSettings(
-                PlaceLaunchFactoryCore.VaultSettings({
-                    hub: hub,
+            .setEconomySettings(
+                PlaceLaunchFactoryCore.EconomySettings({
                     xRegistry: address(d.xRegistry),
                     staking: address(d.staking),
                     rewardRegistry: address(d.rewardRegistry),
-                    processInterval: uint64(vm.envOr("PROCESS_INTERVAL", uint256(1 days))),
+                    rewardsDistributor: address(d.distributor),
                     defaultCampaignDelay: uint64(vm.envOr("DEFAULT_CAMPAIGN_DELAY", uint256(30 days))),
-                    rulesHash: hub == address(0) ? bytes32(0) : vm.envBytes32("RULES_HASH"),
-                    rulesURI: hub == address(0) ? "" : vm.envString("RULES_URI")
+                    defaultCampaignEpochs: uint64(vm.envOr("DEFAULT_CAMPAIGN_EPOCHS", uint256(30)))
                 })
             );
         d.factory
             .setQuoteLimits(
                 address(0),
                 PlaceLaunchFactoryCore.QuoteLimits({
-                    maxBurnPerProcess: uint128(vm.envOr("ETH_MAX_BURN", uint256(0.01 ether))),
                     defaultCampaignMinimum: uint128(vm.envOr("ETH_DEFAULT_MINIMUM", uint256(0.05 ether)))
                 })
             );
@@ -146,6 +155,7 @@ contract DeployPlaceLaunch is Script {
             d.factory.transferOwnership(finalOwner);
             d.xRegistry.transferOwnership(finalOwner);
             d.rewardRegistry.transferOwnership(finalOwner);
+            d.distributor.transferOwnership(finalOwner);
             if (existingStaking == address(0)) d.staking.transferOwnership(finalOwner);
         }
         vm.stopBroadcast();
@@ -155,6 +165,8 @@ contract DeployPlaceLaunch is Script {
         console.log("FeeEscrow", address(d.escrow));
         console.log("AnnouncementRegistry", address(d.announcements));
         console.log("PlaceCreatorVault (implementation)", address(d.vaultImplementation));
+        console.log("PlaceCommunityVault (implementation)", address(d.communityVaultImplementation));
+        console.log("PlaceRewardsDistributor", address(d.distributor));
         console.log("XRecipientRegistry", address(d.xRegistry));
         console.log("PlaceLaunchBuyAdapter", address(d.adapter));
         console.log("PlaceLaunchTokenDeployer", address(d.tokenDeployer));

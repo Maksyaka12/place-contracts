@@ -1,0 +1,19 @@
+{
+  "announcementRegistry": "0x3E390eE17009b083d23420557822f90E0da86E87",
+  "chainId": 84532,
+  "communityVaultImplementation": "0xc2Bae2cd4c26Ce46860fD7749dec0ADAcAd083dc",
+  "creatorVaultImplementation": "0xF7C91c7642FFfC8131c60A78685D6741a2539a98",
+  "factory": "0x5AC1d5Bf12017502242d45ae9F519DEdce15E453",
+  "feeEscrow": "0x892c643A63DE6e7B9b694Bd10B5D4304d8E68ea4",
+  "hook": "0x228f6Dc153a6a164591B240941b819acF8862acC",
+  "launchBuyAdapter": "0x396f2875AF9771B33F33d9a19bf97919737FF0fb",
+  "launchValidation": "0x2A339110AcB956108C94e9bED6efC24f69051E24",
+  "publisher": "0x0851B25D5D5b38BA260258A1520aff53E72c757d",
+  "rewardTokenRegistry": "0xF2941258d77903409DEc6746A9668Aa84D3899A0",
+  "rewardsDistributor": "0x793da842A6c43A0429b996b97a03246771eCA6eD",
+  "staking": "0x693dd75b148a12c3d90935ea6354C5d1e2629283",
+  "startBlock": 59718515,
+  "tokenDeployer": "0xDF75125cc16921aA7b61714Fd1E5D143Da8D7c66",
+  "version": "0.3.0-testnet",
+  "xRecipientRegistry": "0xD5ede8771fAd4DbB1146A15213a8db37773A14eD"
+}

@@ -4,14 +4,39 @@ Smart contracts of **Place Launch**, the token launchpad of [Place](https://gith
 
 A launch creates a fixed-supply token (1 billion, as a **B20** token or a plain **ERC-20**) and puts the whole supply into a Uniswap v4 pool as single-sided liquidity in one transaction. A shared v4 hook owns that liquidity forever: no code path removes it. Buyers bring the ETH, USDC, crypto major or tokenized stock that the token is paired with.
 
-- **Fee:** a fixed 1% on every swap, taken in the paired asset: 70% (0.7% of the trade) to the launch's creator vault, 30% to the platform.
-- **Anti-snipe:** the fee opens high and decays to 1% within seconds of launch; the surcharge goes to the platform. The creator's launch buy pays the normal 1%.
-- **Token economics is a contract, not a promise:** the creator's 70% is split into three baskets fixed at launch (they can only grow later): **creator**, **burn** (bought back in the same pool and sent to `0x…dEaD` by `process()`, which anyone can call, capped per call and per interval) and **community fund** (the creator cannot withdraw it: it can only fund Place hub campaigns or `PlaceStaking` programs for the token, in a white-listed reward token, swapped in the same transaction).
+## Launch types
+
+The creator picks the type at launch. Nothing about the fees can change afterwards.
+
+| | **Standard** | **Economy** |
+|---|---|---|
+| Swap tax | 1% on buys and sells | buy tax and sell tax, **1% to 5%** each |
+| Platform | 30% of the tax (0.3% of the trade) | 30% of the tax (0.3% to 1.5% of the trade) |
+| The other 70% | creator vault | five baskets that sum to 100%: **creator**, **holder rewards**, **trader rewards**, **burn**, **community pool** |
+
+- **Creator** (`PlaceCreatorVault`, both types): the creator's payout address, optionally shared with X accounts (paid once the account binds a wallet in `XRecipientRegistry`).
+- **Holder rewards / trader rewards** (`PlaceRewardsDistributor`): paid daily in the **reward token** the creator picked at launch (the paired asset, the launch token, or any token the `PlaceRewardTokenRegistry` lists a route to). Holders qualify with a minimum balance (10,000 tokens up to the supply); traders with a minimum daily volume in the paired asset and share the day's budget by volume.
+- **Burn**: this basket is charged in the launch token and accumulates in the `FeeEscrow`; anyone calls `FeeEscrow.burn(token)` to send it to `0x…dEaD`.
+- **Community pool** (`PlaceCommunityVault`): the creator cannot withdraw it. It only funds reward programs for the token: daily holder or trader streams in the distributor, or `PlaceStaking` programs, in any white-listed reward token (swapped in the same transaction with `minOut` and a per-hop price impact cap). If it sits unused for 30 days, anyone turns it into a holders stream.
+- **Anti-snipe** (optional per launch): the tax opens at 99% and decays to the normal tax within 20 seconds; the surcharge goes to the platform. The creator's launch buy pays the normal tax.
 - **Launch fee:** 0.0005 ETH per launch.
+
+## Daily rewards
+
+`PlaceRewardsDistributor` runs reward streams in UTC-day epochs:
+
+1. The hook keeps each launch's holder and trader baskets in the `FeeEscrow`, one account per stream.
+2. Once a day anyone calls `closeEpoch(token)`. The stream pulls its account and, when the reward token differs from the paired asset, swaps it along the registry route (capped price impact per hop; a swap that exceeds the cap is deferred and can be retried in slices with `convert`).
+3. The Place publisher posts a **cumulative** Merkle root per stream: every account's total over all days, with the table on IPFS. A root's total can never exceed what the stream has funded, and claims can never exceed the root's total.
+4. Accounts claim the difference between their cumulative amount and what they already claimed, for many streams at once with `claimMany`. A day with nobody eligible leaves its budget for the following days. Rewards do not expire.
+
+Anyone can also fund a stream up front for any token (`createStream`, N daily epochs, 5% stream fee); the community pool uses this for its campaigns. Budget that was never allocated returns to the funder 30 days after the last epoch.
+
+Leaf format: `keccak256(bytes.concat(keccak256(abi.encode(streamId, account, cumulativeAmount))))`.
 
 ## Status
 
-Place Launch 0.2.0 is on the `dev` branch and deployed to **Base Sepolia only**; addresses are in [`DEPLOYMENTS.md`](DEPLOYMENTS.md). The code is **not audited yet**. An audit is required before mainnet.
+Place Launch **0.3.0** (Standard and Economy launches, daily rewards, community pool) is on the `dev` branch and **not deployed yet**. Place Launch 0.2.0 is deployed to **Base Sepolia only**; addresses are in [`DEPLOYMENTS.md`](DEPLOYMENTS.md). The code is **not audited yet**. An audit is required before mainnet.
 
 ## Build
 
@@ -29,19 +54,19 @@ If you cloned without `--recursive`, run `git submodule update --init --recursiv
 
 `forge test` runs everything: unit, fuzz and invariant tests locally, and fork tests that fork Base Sepolia and Base
 through public RPCs (override with `BASE_SEPOLIA_RPC_URL` / `BASE_RPC_URL`). B20 only exists on the forks.
+`forge test --no-match-contract Fork` runs the local suites only.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/launch/` | launch core: hook, factory (ERC-20 and B20), operations, validation, fee math, ERC-20 token |
-| `src/place/` | `PlaceCreatorVault`, `PlaceRewardTokenRegistry`, `XRecipientRegistry`, `PlaceLaunchBuyAdapter` |
+| `src/launch/` | launch core: hook, factory (ERC-20 and B20, Standard and Economy), operations, validation, fee math, ERC-20 token |
+| `src/place/` | `PlaceCreatorVault`, `PlaceCommunityVault`, `PlaceRewardsDistributor`, `PlaceRewardTokenRegistry`, `XRecipientRegistry`, `PlaceLaunchBuyAdapter` |
 | `src/staking/` | `PlaceStaking`: staking programs for any token (GPL-3.0-only) |
-| `src/FeeEscrow.sol`, `src/AnnouncementRegistry.sol`, `src/base/` | fee escrow (pull claims), announcements, v4 hook base |
+| `src/FeeEscrow.sol`, `src/AnnouncementRegistry.sol`, `src/base/` | fee escrow (pull claims, reward accounts, burn), announcements, v4 hook base |
 | `script/DeployPlaceLaunch.s.sol` | mines the hook address and deploys + wires the suite |
 | `script/RegisterQuotes.s.sol`, `script/quotes/base.json` | launch pairs on Base, batches of 64 |
-| `script/L5Sepolia.s.sol`, `script/L5LiveRun.s.sol` | Base Sepolia deploy of 0.2.0 and live run (launches, swaps through the Universal Router, `process()` burn, fund campaigns and staking). |
-| `rules/launch-holders-v2.json` | rules template committed by creator vaults (0.2.0+) for community fund campaigns; `v1` is the 0.1.0 template |
+| `rules/` | rules templates committed by 0.1.0 and 0.2.0 creator vaults for hub campaigns |
 
 ## Security
 

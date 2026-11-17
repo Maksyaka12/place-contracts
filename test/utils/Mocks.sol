@@ -1,64 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IPlaceHub, IPlaceConfig} from "../../src/place/interfaces/IPlaceHub.sol";
-
-/// @notice Minimal stand-in for PlaceHub v1.0.0: takes pool + fee like the real hub and records the params.
-contract MockHub is IPlaceHub, IPlaceConfig {
-    uint16 public feeBps;
-    CreateParams[] internal _created;
-    address[] public creators;
-    uint256[] public paid;
-
-    function setFee(uint16 bps) external {
-        feeBps = bps;
-    }
-
-    function config() external view returns (IPlaceConfig) {
-        return IPlaceConfig(address(this));
-    }
-
-    function campaignFeeBps(address) external view returns (uint16) {
-        return feeBps;
-    }
-
-    function createCampaign(CreateParams calldata p) external payable returns (uint256 id) {
-        uint256 due = uint256(p.pool) + uint256(p.pool) * feeBps / 10_000;
-        if (p.rewardToken == address(0)) {
-            require(msg.value == due, "payment");
-        } else {
-            require(msg.value == 0, "payment");
-            IERC20(p.rewardToken).transferFrom(msg.sender, address(this), due);
-        }
-        id = _created.length;
-        _created.push(p);
-        creators.push(msg.sender);
-        paid.push(due);
-    }
-
-    function refundUnpublished(uint256 id) external {
-        require(msg.sender == creators[id], "creator");
-        uint256 amount = paid[id];
-        paid[id] = 0;
-        address reward = _created[id].rewardToken;
-        if (reward == address(0)) {
-            (bool ok,) = msg.sender.call{value: amount}("");
-            require(ok, "refund");
-        } else {
-            IERC20(reward).transfer(msg.sender, amount);
-        }
-    }
-
-    function created(uint256 id) external view returns (CreateParams memory) {
-        return _created[id];
-    }
-
-    function count() external view returns (uint256) {
-        return _created.length;
-    }
-}
-
 contract MockXRegistry {
     mapping(uint256 => address) public recipientOf;
 
@@ -67,27 +9,49 @@ contract MockXRegistry {
     }
 }
 
-/// @notice FeeEscrow stand-in for vault-only fuzzing: `owed` ETH is paid out on `claimFor`.
-contract MockEscrow {
-    mapping(address => mapping(address => uint256)) public owed;
-
-    function credit(address recipient) external payable {
-        owed[recipient][address(0)] += msg.value;
+/// @notice Builds Merkle trees with the distributor's leaf format (sorted pairs, OpenZeppelin MerkleProof).
+library MerkleHelper {
+    function leaf(bytes32 streamId, address account, uint256 cumulativeAmount) internal pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(streamId, account, cumulativeAmount))));
     }
 
-    function claimFor(address recipient, address currency) external {
-        uint256 amount = owed[recipient][currency];
-        owed[recipient][currency] = 0;
-        (bool ok,) = recipient.call{value: amount}("");
-        require(ok, "pay");
+    function hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
+        return a < b ? keccak256(abi.encode(a, b)) : keccak256(abi.encode(b, a));
     }
-}
 
-/// @notice Hook stand-in that only tells the vault its PoolManager.
-contract MockHookPm {
-    address public poolManager;
+    /// @dev Root and per-leaf proofs of a tree over `leaves` (odd nodes are carried up unchanged).
+    function build(bytes32[] memory leaves) internal pure returns (bytes32 root, bytes32[][] memory proofs) {
+        uint256 n = leaves.length;
+        proofs = new bytes32[][](n);
+        uint256[] memory position = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) {
+            position[i] = i;
+            proofs[i] = new bytes32[](0);
+        }
+        bytes32[] memory level = leaves;
+        while (level.length > 1) {
+            uint256 m = (level.length + 1) / 2;
+            bytes32[] memory next = new bytes32[](m);
+            for (uint256 j = 0; j < m; j++) {
+                uint256 left = 2 * j;
+                next[j] = left + 1 < level.length ? hashPair(level[left], level[left + 1]) : level[left];
+            }
+            for (uint256 i = 0; i < n; i++) {
+                uint256 p = position[i];
+                uint256 sibling = p ^ 1;
+                if (sibling < level.length) proofs[i] = _push(proofs[i], level[sibling]);
+                position[i] = p / 2;
+            }
+            level = next;
+        }
+        root = level[0];
+    }
 
-    constructor(address pm) {
-        poolManager = pm;
+    function _push(bytes32[] memory arr, bytes32 value) private pure returns (bytes32[] memory out) {
+        out = new bytes32[](arr.length + 1);
+        for (uint256 i = 0; i < arr.length; i++) {
+            out[i] = arr[i];
+        }
+        out[arr.length] = value;
     }
 }

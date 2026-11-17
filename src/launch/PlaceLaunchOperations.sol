@@ -10,6 +10,8 @@ import {PlaceLaunchTokenDeployer} from "./PlaceLaunchTokenDeployer.sol";
 import {PlaceSuiteConstants} from "./PlaceSuiteConstants.sol";
 import {IB20, IB20Factory} from "./interfaces/IB20.sol";
 import {PlaceCreatorVault} from "../place/PlaceCreatorVault.sol";
+import {PlaceCommunityVault} from "../place/PlaceCommunityVault.sol";
+import {IPlaceRewardsDistributor} from "../place/interfaces/IPlaceRewardsDistributor.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -114,13 +116,14 @@ library PlaceLaunchOperations {
         PlaceLaunchHook hook;
         PlaceLaunchTokenDeployer tokenDeployer;
         PlaceFeeMath.TaxPolicy admittedPolicy;
-        PlaceFeeMath.TaxConfiguration taxConfiguration;
         address vaultImplementation;
-        Core.VaultSettings vaultSettings;
+        address communityVaultImplementation;
+        Core.EconomySettings economySettings;
         Core.QuoteLimits quoteLimits;
     }
 
-    event CreatorVaultCreated(address indexed token, address indexed vault, uint16 burnBps, uint16 communityBps);
+    event CreatorVaultCreated(address indexed token, address indexed vault);
+    event CommunityVaultCreated(address indexed token, address indexed vault);
 
     error InvalidConfig();
     error TokenMismatch();
@@ -133,7 +136,7 @@ library PlaceLaunchOperations {
         Core.LaunchPreparation memory preparation,
         mapping(address => Core.TokenKind) storage launchTokenKind,
         address originalCreator
-    ) public returns (address token, PoolId poolId, PoolKey memory key) {
+    ) public returns (address token, PoolId poolId, PoolKey memory key, address communityVault) {
         if (params.tokenKind == Core.TokenKind.B20) {
             token = _createB20(params, preparation, address(context.hook), originalCreator);
         } else {
@@ -161,20 +164,30 @@ library PlaceLaunchOperations {
         if (preparation.tokenIsCurrency0) initialTick -= preparation.spacing;
         if (initialTick < TickMath.MIN_TICK || initialTick > TickMath.MAX_TICK) revert OutOfBounds();
         context.hook.poolManager().initialize(key, TickMath.getSqrtPriceAtTick(initialTick));
-        _createVault(context, params.economics, preparation, token, key);
+        _createVault(context, params.economics, preparation, token, params.quoteToken);
+        PlaceFeeMath.TaxConfiguration memory tax = preparation.taxConfiguration;
+        if (tax.communityAllocationShare != 0) {
+            communityVault = _createCommunityVault(context, params.economics, preparation, token, key);
+        }
+        address distributor;
+        if (tax.holderAllocationShare != 0 || tax.traderAllocationShare != 0) {
+            distributor = context.economySettings.rewardsDistributor;
+            _registerStreams(distributor, context.economySettings.rewardRegistry, params, tax, token, key);
+        }
         PlaceLaunchHook.PoolRegistration memory registration = PlaceLaunchHook.PoolRegistration({
             token: token,
             creator: originalCreator,
             creatorFeeRecipient: preparation.vault,
-            integratorFeeRecipient: address(0),
+            rewardsDistributor: distributor,
+            communityVault: communityVault,
             launchTime: uint48(block.timestamp),
-            antiSnipeEnabled: true,
+            antiSnipeEnabled: params.antiSnipeEnabled,
             admittedPolicy: context.admittedPolicy,
-            taxConfiguration: context.taxConfiguration
+            taxConfiguration: tax
         });
         context.hook.registerPool(key, registration);
         context.hook.seedLiquidity(key, preparation.seedPositions, preparation.tokenIsCurrency0);
-        return (token, key.toId(), key);
+        return (token, key.toId(), key, communityVault);
     }
 
     function predictTokenAddress(
@@ -200,7 +213,7 @@ library PlaceLaunchOperations {
         Core.Economics calldata economics,
         Core.LaunchPreparation memory preparation,
         address token,
-        PoolKey memory key
+        address quote
     ) private {
         address vault = Clones.cloneDeterministic(context.vaultImplementation, preparation.scopedSalt);
         if (vault != preparation.vault) revert InvalidConfig();
@@ -208,26 +221,69 @@ library PlaceLaunchOperations {
             .initialize(
                 PlaceCreatorVault.Initialization({
                     token: token,
-                    poolKey: key,
+                    quote: quote,
                     feeEscrow: context.hook.feeEscrow(),
-                    burnBps: economics.burnBps,
-                    communityBps: economics.communityBps,
                     xShares: economics.xShares,
-                    xRegistry: context.vaultSettings.xRegistry,
-                    settings: PlaceCreatorVault.Settings({
-                        hub: context.vaultSettings.hub,
-                        staking: context.vaultSettings.staking,
-                        rewardRegistry: context.vaultSettings.rewardRegistry,
-                        processInterval: context.vaultSettings.processInterval,
-                        defaultCampaignDelay: context.vaultSettings.defaultCampaignDelay,
-                        maxBurnPerProcess: context.quoteLimits.maxBurnPerProcess,
-                        defaultCampaignMinimum: context.quoteLimits.defaultCampaignMinimum,
-                        rulesHash: context.vaultSettings.rulesHash,
-                        rulesURI: context.vaultSettings.rulesURI
-                    })
+                    xRegistry: context.economySettings.xRegistry
                 })
             );
-        emit CreatorVaultCreated(token, vault, economics.burnBps, economics.communityBps);
+        emit CreatorVaultCreated(token, vault);
+    }
+
+    /// @notice Clones and initializes the launch's PlaceCommunityVault (Economy launches with a community basket).
+    ///         The default campaign pays holders above the launch's own threshold, or 10,000 tokens.
+    function _createCommunityVault(
+        Context memory context,
+        Core.Economics calldata economics,
+        Core.LaunchPreparation memory preparation,
+        address token,
+        PoolKey memory key
+    ) private returns (address vault) {
+        vault = Clones.cloneDeterministic(context.communityVaultImplementation, preparation.scopedSalt);
+        uint256 minHolding = economics.minHolding;
+        if (minHolding == 0) minHolding = PlaceSuiteConstants.MIN_HOLDER_REWARD_HOLDING;
+        PlaceCommunityVault(payable(vault))
+            .initialize(
+                PlaceCommunityVault.Initialization({
+                    token: token,
+                    poolKey: key,
+                    feeEscrow: context.hook.feeEscrow(),
+                    distributor: context.economySettings.rewardsDistributor,
+                    staking: context.economySettings.staking,
+                    rewardRegistry: context.economySettings.rewardRegistry,
+                    defaultCampaignDelay: context.economySettings.defaultCampaignDelay,
+                    defaultCampaignEpochs: context.economySettings.defaultCampaignEpochs,
+                    defaultCampaignMinimum: context.quoteLimits.defaultCampaignMinimum,
+                    defaultMinHolding: minHolding
+                })
+            );
+        emit CommunityVaultCreated(token, vault);
+    }
+
+    /// @notice Registers the launch's holder and/or trader streams in the rewards distributor, which checks the
+    ///         reward token against the registry.
+    function _registerStreams(
+        address distributor,
+        address rewardRegistry,
+        Core.LaunchParams calldata params,
+        PlaceFeeMath.TaxConfiguration memory tax,
+        address token,
+        PoolKey memory key
+    ) private {
+        IPlaceRewardsDistributor(distributor)
+            .registerLaunch(
+                IPlaceRewardsDistributor.LaunchStreams({
+                    token: token,
+                    quote: params.quoteToken,
+                    poolKey: key,
+                    rewardToken: params.economics.rewardToken,
+                    rewardRegistry: rewardRegistry,
+                    holders: tax.holderAllocationShare != 0,
+                    minHolding: params.economics.minHolding,
+                    traders: tax.traderAllocationShare != 0,
+                    minDailyVolume: params.economics.minTraderDailyVolume
+                })
+            );
     }
 
     // ---- Place: B20 genesis ----
