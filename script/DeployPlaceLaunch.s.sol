@@ -34,6 +34,9 @@ import {PlaceStaking} from "../src/staking/PlaceStaking.sol";
 ///   FINAL_OWNER             optional: Safe that must acceptOwnership of factory, X registry, reward-token
 ///                           registry, rewards distributor and staking
 ///   PLACE_STAKING           existing PlaceStaking (default: deploy one, fee STAKING_FEE_BPS, default 500 = 5%)
+///   REWARD_REGISTRY         existing PlaceRewardTokenRegistry (default: deploy one)
+///   NFT_FACTORY             PlaceNftFactory whose collections community vaults may fund (default: none)
+///   PRICE_GUARD             PlacePriceGuard for community buybacks (default: none)
 ///   STREAM_FEE_BPS          fee on funded reward streams, default 500 (5%)
 ///   MAX_PRICE_IMPACT_BPS    per-hop cap of reward and fund swaps in the reward-token registry, default 100 (1%)
 ///   DEFAULT_CAMPAIGN_DELAY  idle community fund -> default holders campaign, default 30 days
@@ -88,7 +91,8 @@ contract DeployPlaceLaunch is Script {
 
         // 2. Factory with its token deployer and vault templates.
         d.vaultImplementation = new PlaceCreatorVault();
-        d.communityVaultImplementation = new PlaceCommunityVault();
+        d.communityVaultImplementation =
+            new PlaceCommunityVault(vm.envOr("NFT_FACTORY", address(0)), vm.envOr("PRICE_GUARD", address(0)));
         d.tokenDeployer = new PlaceLaunchTokenDeployer(deployer);
         PlaceLaunchFactoryCore.Band[] memory bands = new PlaceLaunchFactoryCore.Band[](1);
         bands[0] = PlaceLaunchFactoryCore.Band({lowerOffset: 0, upperOffset: type(int24).max, supplyShareBps: 10_000});
@@ -121,8 +125,10 @@ contract DeployPlaceLaunch is Script {
         d.staking = existingStaking != address(0)
             ? PlaceStaking(payable(existingStaking))
             : new PlaceStaking(deployer, uint16(vm.envOr("STAKING_FEE_BPS", uint256(500))), protocolRecipient);
-        d.rewardRegistry =
-            new PlaceRewardTokenRegistry(deployer, uint16(vm.envOr("MAX_PRICE_IMPACT_BPS", uint256(100))));
+        address existingRegistry = vm.envOr("REWARD_REGISTRY", address(0));
+        d.rewardRegistry = existingRegistry != address(0)
+            ? PlaceRewardTokenRegistry(existingRegistry)
+            : new PlaceRewardTokenRegistry(deployer, uint16(vm.envOr("MAX_PRICE_IMPACT_BPS", uint256(100))));
         d.distributor = new PlaceRewardsDistributor(
             address(d.factory),
             deployer,
@@ -154,7 +160,7 @@ contract DeployPlaceLaunch is Script {
         if (finalOwner != address(0)) {
             d.factory.transferOwnership(finalOwner);
             d.xRegistry.transferOwnership(finalOwner);
-            d.rewardRegistry.transferOwnership(finalOwner);
+            if (existingRegistry == address(0)) d.rewardRegistry.transferOwnership(finalOwner);
             d.distributor.transferOwnership(finalOwner);
             if (existingStaking == address(0)) d.staking.transferOwnership(finalOwner);
         }

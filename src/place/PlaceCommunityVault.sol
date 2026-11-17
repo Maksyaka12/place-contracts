@@ -16,6 +16,7 @@ import {IPlaceRewardsDistributor} from "./interfaces/IPlaceRewardsDistributor.so
 import {IPlaceStaking} from "./interfaces/IPlaceStaking.sol";
 import {IPlaceRewardTokenRegistry} from "./interfaces/IPlaceRewardTokenRegistry.sol";
 import {IFeeEscrowClaims, ICreatorOf} from "./interfaces/IPlaceLaunchViews.sol";
+import {IPlaceNftFactory, IPlaceNftCollection, IPlacePriceGuard} from "../nft/interfaces/IPlaceNft.sol";
 
 interface ICommunityHookWiring {
     function poolManager() external view returns (address);
@@ -27,7 +28,11 @@ interface ICommunityHookWiring {
 ///         token, which the creator (current holder of the creator rights) starts:
 ///         - `fundCampaign`: a daily holders or traders stream in the PlaceRewardsDistributor for this token, funded
 ///           for N epochs;
-///         - `fundStaking`: a PlaceStaking program for stakers of this token.
+///         - `fundStaking`: a PlaceStaking program for stakers of this token;
+///         - `fundNftCampaign`: a daily NFT holders stream for an official, paid PlaceNftCollection of this token
+///           (at most `MAX_NFT_CAMPAIGN_BPS` of the fund's balance, once per `NFT_CAMPAIGN_COOLDOWN`);
+///         - `buybackAndBurn`: buys this token with the fund and sends it to 0x…dEaD, within the registry's
+///           per-hop price impact cap and the PlacePriceGuard reference price.
 ///         The reward can be any token of the PlaceRewardTokenRegistry white list (or this token through its own
 ///         pool): the vault swaps the fund along the listed route, with the creator's `minOut` and the registry's
 ///         per-hop price impact cap, in the same transaction. If the fund is not spent for `defaultCampaignDelay`
@@ -38,6 +43,15 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
     using SafeERC20 for IERC20;
 
     uint256 public constant BPS = 10_000;
+    /// @notice An NFT campaign may spend at most 25% of the fund's balance in the spent asset.
+    uint256 public constant MAX_NFT_CAMPAIGN_BPS = 2_500;
+    uint64 public constant NFT_CAMPAIGN_COOLDOWN = 30 days;
+    address public constant BURN_SINK = 0x000000000000000000000000000000000000dEaD;
+
+    /// @notice Place NFT factory whose official collections of this token can get campaigns (zero: none).
+    IPlaceNftFactory public immutable nftFactory;
+    /// @notice Reference prices for buybacks (zero: buybacks only burn tokens the fund already holds).
+    IPlacePriceGuard public immutable priceGuard;
 
     struct Initialization {
         address token;
@@ -65,6 +79,26 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
         string metadataURI;
     }
 
+    /// @notice A daily NFT holders stream for a PlaceNftCollection of this token, paid from the fund (creator only).
+    struct NftCampaignRequest {
+        address collection;
+        address fundAsset;
+        uint256 amountIn; // stream fee included; at most MAX_NFT_CAMPAIGN_BPS of the fund in fundAsset
+        address rewardToken;
+        uint256 minOut;
+        uint64 startEpoch;
+        uint64 epochCount;
+        uint256 minNfts; // NFTs a wallet must hold
+        string metadataURI;
+    }
+
+    /// @notice Buy back this token with the fund and burn it (creator only).
+    struct BuybackRequest {
+        address fundAsset; // this token: burned as is; the quote: through the launch pool; else a listed route
+        uint256 amountIn;
+        uint256 minOut; // the creator's own floor, on top of the guard's
+    }
+
     /// @notice A PlaceStaking program for this token, paid from the fund (creator only).
     struct StakingRequest {
         address fundAsset;
@@ -88,6 +122,9 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
     Initialization internal _settings;
 
     uint64 public lastFundSpendAt;
+    uint64 public lastNftCampaignAt;
+    /// @notice Tokens of this launch the vault has burned.
+    uint256 public totalBurned;
 
     event Collected(uint256 amount);
     event FundSwapped(address indexed fundAsset, address indexed rewardToken, uint256 amountIn, uint256 amountOut);
@@ -100,6 +137,8 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
         uint256 paid,
         bool isDefault
     );
+    event FundNftCampaignCreated(bytes32 indexed streamId, address indexed collection);
+    event FundBurned(address indexed fundAsset, uint256 amountIn, uint256 tokensBurned);
     event FundStakingCreated(
         bytes32 indexed stakingVaultId,
         address indexed rewardToken,
@@ -115,8 +154,16 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
     error FundTooSmall(uint256 available, uint256 needed);
     error RouteNotListed(address fundAsset, address rewardToken);
     error SlippageExceeded(uint256 amountOut, uint256 minOut);
+    error InvalidCollection();
+    error NftCampaignTooSoon(uint64 nextAt);
+    error NftCampaignTooLarge(uint256 amountIn, uint256 maxIn);
+    error BuybackDisabled();
 
-    constructor() {
+    /// @param placeNftFactory Place NFT factory (zero: no NFT campaigns).
+    /// @param guard           PlacePriceGuard (zero: buybacks only burn tokens the fund already holds).
+    constructor(address placeNftFactory, address guard) {
+        nftFactory = IPlaceNftFactory(placeNftFactory);
+        priceGuard = IPlacePriceGuard(guard);
         _disableInitializers();
     }
 
@@ -160,6 +207,7 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
         if (available < minimum) revert FundTooSmall(available, minimum);
         lastFundSpendAt = uint64(block.timestamp);
         streamId = _createStream(
+            token,
             IPlaceRewardsDistributor.Kind.Holders,
             quote,
             available,
@@ -179,8 +227,81 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
     function fundCampaign(CampaignRequest calldata r) external nonReentrant returns (bytes32 streamId) {
         _requireCreator();
         uint256 budget = _spendFund(r.fundAsset, r.amountIn, r.rewardToken, r.minOut);
-        streamId =
-            _createStream(r.kind, r.rewardToken, budget, r.startEpoch, r.epochCount, r.criterion, r.metadataURI, false);
+        streamId = _createStream(
+            token, r.kind, r.rewardToken, budget, r.startEpoch, r.epochCount, r.criterion, r.metadataURI, false
+        );
+    }
+
+    /// @notice A daily NFT holders stream for `r.collection` from the fund. The collection must be made by the Place
+    ///         NFT factory for this token, be official (made by the token's creator), have a non-zero mint price
+    ///         (with a free mint the creator could mint the whole collection to own wallets at no cost) and at
+    ///         least one NFT. Limits: `MAX_NFT_CAMPAIGN_BPS` of the fund in `fundAsset`, one campaign per
+    ///         `NFT_CAMPAIGN_COOLDOWN`.
+    function fundNftCampaign(NftCampaignRequest calldata r) external nonReentrant returns (bytes32 streamId) {
+        _requireCreator();
+        IPlaceNftCollection c = IPlaceNftCollection(r.collection);
+        if (
+            address(nftFactory) == address(0) || !nftFactory.isCollection(r.collection) || c.token() != token
+                || !c.official() || c.mintPrice() == 0 || c.totalMinted() == 0
+        ) revert InvalidCollection();
+        uint64 nextAt = lastNftCampaignAt == 0 ? 0 : lastNftCampaignAt + NFT_CAMPAIGN_COOLDOWN;
+        // forge-lint: disable-next-line(block-timestamp) measured in days
+        if (block.timestamp < nextAt) revert NftCampaignTooSoon(nextAt);
+        _collect();
+        uint256 maxIn = fundBalance(r.fundAsset) * MAX_NFT_CAMPAIGN_BPS / BPS;
+        if (r.amountIn > maxIn) revert NftCampaignTooLarge(r.amountIn, maxIn);
+        lastNftCampaignAt = uint64(block.timestamp);
+        uint256 budget = _spendFund(r.fundAsset, r.amountIn, r.rewardToken, r.minOut);
+        streamId = _createStream(
+            r.collection,
+            IPlaceRewardsDistributor.Kind.Holders,
+            r.rewardToken,
+            budget,
+            r.startEpoch,
+            r.epochCount,
+            r.minNfts,
+            r.metadataURI,
+            false
+        );
+        emit FundNftCampaignCreated(streamId, r.collection);
+    }
+
+    /// @notice Buys this token with `amountIn` of `fundAsset` and burns it (0x…dEaD); tokens of this launch the
+    ///         fund holds are burned as they are. A swap goes through this launch's pool (from the quote) or a listed
+    ///         registry route; each hop may move its pool by at most the registry's `maxPriceImpactBps`, and the
+    ///         output must reach the PlacePriceGuard reference output minus (max deviation + impact per hop) and
+    ///         `minOut`, so a sandwich around the call makes it revert.
+    function buybackAndBurn(BuybackRequest calldata r) external nonReentrant returns (uint256 burned) {
+        _requireCreator();
+        _collect();
+        uint256 available = fundBalance(r.fundAsset);
+        if (r.amountIn == 0 || r.amountIn > available) revert FundTooSmall(available, r.amountIn);
+        lastFundSpendAt = uint64(block.timestamp);
+        if (r.fundAsset == token) {
+            burned = r.amountIn;
+        } else {
+            address registry = _settings.rewardRegistry;
+            if (address(priceGuard) == address(0) || registry == address(0)) revert BuybackDisabled();
+            PoolKey[] memory hops;
+            if (r.fundAsset == quote) {
+                hops = new PoolKey[](1);
+                hops[0] = _poolKey;
+            } else {
+                hops = IPlaceRewardTokenRegistry(registry).routeOf(r.fundAsset, token);
+                if (hops.length == 0) revert RouteNotListed(r.fundAsset, token);
+            }
+            (uint256 referenceOut,) = priceGuard.quote(hops, r.fundAsset, r.amountIn);
+            priceGuard.observeRoute(hops);
+            uint16 impact = IPlaceRewardTokenRegistry(registry).maxPriceImpactBps();
+            uint256 tolerance = uint256(priceGuard.config().maxDeviationBps) + uint256(impact) * hops.length;
+            uint256 floor = tolerance >= BPS ? 0 : referenceOut * (BPS - tolerance) / BPS;
+            if (r.minOut > floor) floor = r.minOut;
+            (, burned) = _swapRoute(r.fundAsset, hops, r.amountIn, impact);
+            if (burned < floor) revert SlippageExceeded(burned, floor);
+        }
+        totalBurned += burned;
+        IERC20(token).safeTransfer(BURN_SINK, burned);
+        emit FundBurned(r.fundAsset, r.amountIn, burned);
     }
 
     /// @notice A PlaceStaking program for stakers of this token from the fund: the whole swap output, minus the
@@ -280,6 +401,7 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
     }
 
     function _createStream(
+        address target,
         IPlaceRewardsDistributor.Kind kind,
         address rewardToken,
         uint256 budget,
@@ -294,7 +416,7 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
         uint256 perEpoch = _perEpoch(budget, epochCount, feeBps);
         uint256 total = _withFee(perEpoch, epochCount, feeBps);
         IPlaceRewardsDistributor.CreateParams memory p = IPlaceRewardsDistributor.CreateParams({
-            token: token,
+            token: target,
             kind: kind,
             rewardToken: rewardToken,
             startEpoch: startEpoch,

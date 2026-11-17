@@ -29,6 +29,9 @@ import {IPlaceRewardsDistributor} from "../../src/place/interfaces/IPlaceRewards
 import {PlaceRewardTokenRegistry} from "../../src/place/PlaceRewardTokenRegistry.sol";
 import {PlaceStaking} from "../../src/staking/PlaceStaking.sol";
 import {MockXRegistry} from "./Mocks.sol";
+import {PlacePriceGuard} from "../../src/nft/PlacePriceGuard.sol";
+import {PlaceNftCollection} from "../../src/nft/PlaceNftCollection.sol";
+import {PlaceNftFactory} from "../../src/nft/PlaceNftFactory.sol";
 
 /// @notice Deploys a full Place Launch suite (hook at a flag-mined address, factory, escrow, announcements) and
 ///         its economy (rewards distributor, reward-token registry with an ETH -> USD route through a plain v4 pool,
@@ -70,6 +73,13 @@ abstract contract LaunchFixture is Test {
     MockERC20 internal usd;
     PoolKey internal ethUsd;
     PoolModifyLiquidityTest internal lp;
+    PlacePriceGuard internal guard;
+    PlaceNftFactory internal nftFactory;
+
+    uint32 internal constant GUARD_INTERVAL = 60;
+    uint32 internal constant GUARD_WARMUP = 10 minutes;
+    uint16 internal constant GUARD_STEP = 100; // 1% per observation
+    uint16 internal constant GUARD_DEVIATION = 300; // 3%
 
     /// @dev The LP router refunds unused ETH; tests also receive stream refunds and payouts.
     receive() external payable {}
@@ -81,6 +91,7 @@ abstract contract LaunchFixture is Test {
         address hookAddress = address(uint160(0x4444 << 144) | HOOK_FLAGS);
         deployCodeTo("PlaceLaunchHook.sol:PlaceLaunchHook", abi.encode(pm, address(this)), hookAddress);
         hook = PlaceLaunchHook(hookAddress);
+        _deployNft();
         tokenDeployer = new PlaceLaunchTokenDeployer(address(this));
         PlaceLaunchFactoryCore.Band[] memory bands = new PlaceLaunchFactoryCore.Band[](1);
         bands[0] = PlaceLaunchFactoryCore.Band({lowerOffset: 0, upperOffset: type(int24).max, supplyShareBps: 10_000});
@@ -94,7 +105,7 @@ abstract contract LaunchFixture is Test {
                 protocolFeeRecipient: PLATFORM,
                 bandTemplate: bands,
                 creatorVaultImplementation: address(new PlaceCreatorVault()),
-                communityVaultImplementation: address(new PlaceCommunityVault())
+                communityVaultImplementation: address(new PlaceCommunityVault(address(nftFactory), address(guard)))
             })
         );
         escrow = new FeeEscrow(pm, address(hook));
@@ -139,6 +150,46 @@ abstract contract LaunchFixture is Test {
             })
         );
         factory.setQuoteLimits(address(0), PlaceLaunchFactoryCore.QuoteLimits({defaultCampaignMinimum: DEFAULT_MIN}));
+        nftFactory.setRewardRegistry(address(rewards));
+        nftFactory.addLaunchFactory(address(factory));
+    }
+
+    /// @dev Price guard and NFT factory (the community vault template needs both); registry and launch factory
+    ///      are wired in `_deployEconomy`.
+    function _deployNft() internal {
+        guard = new PlacePriceGuard(
+            pm,
+            address(this),
+            PlacePriceGuard.Config({
+                minInterval: GUARD_INTERVAL,
+                warmup: GUARD_WARMUP,
+                maxStepBps: GUARD_STEP,
+                maxDeviationBps: GUARD_DEVIATION
+            })
+        );
+        nftFactory = new PlaceNftFactory(
+            pm,
+            address(this),
+            PlaceNftFactory.Settings({
+                implementation: address(new PlaceNftCollection()),
+                platformRecipient: PLATFORM,
+                rewardRegistry: address(0),
+                priceGuard: address(guard),
+                weth: address(0),
+                creationFee: 0.0005 ether
+            })
+        );
+    }
+
+    /// @dev Observes `route` until its reference is warm: one observation per interval for the warmup period.
+    function _warmGuard(PoolKey[] memory route) internal {
+        guard.observeRoute(route);
+        for (uint256 i = 0; i <= GUARD_WARMUP / GUARD_INTERVAL; i++) {
+            vm.warp(vm.getBlockTimestamp() + GUARD_INTERVAL);
+            vm.roll(vm.getBlockNumber() + 1);
+            guard.observeRoute(route);
+        }
+        vm.roll(vm.getBlockNumber() + 1);
     }
 
     function _params(PlaceLaunchFactoryCore.TokenKind kind, address quote)

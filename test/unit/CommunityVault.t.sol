@@ -105,7 +105,7 @@ contract CommunityVaultTest is LaunchFixture {
         vm.expectPartialRevert(PlaceCommunityVault.SlippageExceeded.selector);
         vm.prank(CREATOR);
         vault.fundCampaign(_campaign(address(usd), 0.01 ether, 1_000e18));
-        address unlisted = address(new PlaceCommunityVault());
+        address unlisted = address(new PlaceCommunityVault(address(0), address(0)));
         vm.expectRevert(abi.encodeWithSelector(PlaceCommunityVault.RouteNotListed.selector, address(0), unlisted));
         vm.prank(CREATOR);
         vault.fundCampaign(_campaign(unlisted, 0.01 ether, 0));

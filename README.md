@@ -17,7 +17,7 @@ The creator picks the type at launch. Nothing about the fees can change afterwar
 - **Creator** (`PlaceCreatorVault`, both types): the creator's payout address, optionally shared with X accounts (paid once the account binds a wallet in `XRecipientRegistry`).
 - **Holder rewards / trader rewards** (`PlaceRewardsDistributor`): paid daily in the **reward token** the creator picked at launch (the paired asset, the launch token, or any token the `PlaceRewardTokenRegistry` lists a route to). Holders qualify with a minimum balance (10,000 tokens up to the supply); traders with a minimum daily volume in the paired asset and share the day's budget by volume.
 - **Burn**: this basket is charged in the launch token and accumulates in the `FeeEscrow`; anyone calls `FeeEscrow.burn(token)` to send it to `0x…dEaD`.
-- **Community pool** (`PlaceCommunityVault`): the creator cannot withdraw it. It only funds reward programs for the token: daily holder or trader streams in the distributor, or `PlaceStaking` programs, in any white-listed reward token (swapped in the same transaction with `minOut` and a per-hop price impact cap). If it sits unused for 30 days, anyone turns it into a holders stream.
+- **Community pool** (`PlaceCommunityVault`): the creator cannot withdraw it. It only funds reward programs for the token: daily holder or trader streams in the distributor, or `PlaceStaking` programs, in any white-listed reward token (swapped in the same transaction with `minOut` and a per-hop price impact cap). If it sits unused for 30 days, anyone turns it into a holders stream. The creator can also fund NFT holder streams for an official, paid collection of the token (at most 25% of the fund, once per 30 days) and buy back and burn the token (`buybackAndBurn`, guarded by `PlacePriceGuard`).
 - **Anti-snipe** (optional per launch): the tax opens at 99% and decays to the normal tax within 20 seconds; the surcharge goes to the platform. The creator's launch buy pays the normal tax.
 - **Launch fee:** 0.0005 ETH per launch.
 
@@ -33,6 +33,22 @@ The creator picks the type at launch. Nothing about the fees can change afterwar
 Anyone can also fund a stream up front for any token (`createStream`, N daily epochs, 5% stream fee); the community pool uses this for its campaigns. Budget that was never allocated returns to the funder 30 days after the last epoch.
 
 Leaf format: `keccak256(bytes.concat(keccak256(abi.encode(streamId, account, cumulativeAmount))))`.
+
+## NFT collections
+
+`PlaceNftFactory` creates `PlaceNftCollection` clones (ERC-721, ERC-2981) for any token, or none. A collection made by
+the token's creator is marked **official**.
+
+- **Unique** (one metadata file per NFT in an IPFS folder) or **Edition** (one URI for all); supply, per-wallet limit,
+  mint window, collection metadata (`contractURI`).
+- Mint in ETH at a fixed price, and optionally in the linked token at the market equivalent of that price.
+- Every mint payment and every royalty (0–10%) is split: **20% platform**, the rest between the creator, NFT holders
+  (an on-chain accumulator per NFT, claimed by its owner) and buyback & burn of the linked token, as the creator set at
+  creation. Token payments are burned at once; the ETH part buys the token through its Uniswap v4 pool when anyone calls
+  `buyback`.
+- `PlacePriceGuard` keeps a reference price per pool that moves at most 1% per observation and is never used in the
+  block it was written. Token-priced mints charge the larger of the reference and spot amounts, buybacks must reach
+  the reference output minus a tolerance, and both refuse to run while spot and reference differ by more than 3%.
 
 ## Status
 
@@ -62,9 +78,11 @@ through public RPCs (override with `BASE_SEPOLIA_RPC_URL` / `BASE_RPC_URL`). B20
 |---|---|
 | `src/launch/` | launch core: hook, factory (ERC-20 and B20, Standard and Economy), operations, validation, fee math, ERC-20 token |
 | `src/place/` | `PlaceCreatorVault`, `PlaceCommunityVault`, `PlaceRewardsDistributor`, `PlaceRewardTokenRegistry`, `XRecipientRegistry`, `PlaceLaunchBuyAdapter` |
+| `src/nft/` | `PlaceNftFactory`, `PlaceNftCollection`, `PlacePriceGuard` |
 | `src/staking/` | `PlaceStaking`: staking programs for any token (GPL-3.0-only) |
 | `src/FeeEscrow.sol`, `src/AnnouncementRegistry.sol`, `src/base/` | fee escrow (pull claims, reward accounts, burn), announcements, v4 hook base |
 | `script/DeployPlaceLaunch.s.sol` | mines the hook address and deploys + wires the suite |
+| `script/V75Sepolia.s.sol` | Base Sepolia 0.3.1-testnet: NFT launchpad, price guard and a launch suite with the new community vaults |
 | `script/RegisterQuotes.s.sol`, `script/quotes/base.json` | launch pairs on Base, batches of 64 |
 | `rules/` | rules templates committed by 0.1.0 and 0.2.0 creator vaults for hub campaigns |
 
