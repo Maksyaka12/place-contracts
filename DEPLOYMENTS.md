@@ -12,7 +12,8 @@ the 0.3.0 launch suite again, with community vaults that fund NFT holder campaig
 plus the NFT launchpad (`PlaceNftFactory`, `PlaceNftSwapper`, `PlacePriceGuard`, `PlaceNftCollection` clones).
 The reward-token registry and `PlaceStaking` of 0.3.0 are reused; the NFT factory recognises creators of both launch
 factories. Every owner role is held by the platform wallet `0x9F68…6fC4`. All 17 contracts are verified on Sourcify/Blockscout and
-all but `PlaceNftFactory` on Basescan (Basescan reports a bytecode mismatch for it; the Sourcify match is exact).
+all but `PlaceNftFactory` on Basescan. Its Sourcify match is partial: the metadata hash of the `PlaceNftSwapper` it embeds
+differs (the sources were compiled with slightly different file text), which Basescan does not accept.
 Machine-readable: [`deployments/base-sepolia-0.3.1.json`](deployments/base-sepolia-0.3.1.json).
 
 | Contract | Address |
@@ -50,7 +51,7 @@ use the new template; existing collections are clones of `0x5Ad1…CeD7` and kee
 | PlaceNftCollection (implementation, current) | [`0x1d4185007663073A867c42e331e95fE8487ea39E`](https://sepolia.basescan.org/address/0x1d4185007663073A867c42e331e95fE8487ea39E#code) |
 | PlaceNftCollection (implementation, previous) | [`0x5Ad1008D5c9F52D35491815812c8147D7580CeD7`](https://sepolia.basescan.org/address/0x5Ad1008D5c9F52D35491815812c8147D7580CeD7#code) |
 
-Not yet verified on Basescan. Machine-readable: `nftCollectionImplementation` in
+Verified on Basescan and Sourcify. Machine-readable: `nftCollectionImplementation` in
 [`deployments/base-sepolia-0.3.1.json`](deployments/base-sepolia-0.3.1.json), history in
 [`deployments/base-sepolia-0.3.1-nft-template.json`](deployments/base-sepolia-0.3.1-nft-template.json).
 
