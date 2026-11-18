@@ -31,14 +31,15 @@ Machine-readable: [`deployments/base-sepolia-0.3.1.json`](deployments/base-sepol
 | PlaceLaunchOperations (library) | [`0x81e5E0254c042a61a24f3fE67D2d77E2Fb0F158E`](https://sepolia.basescan.org/address/0x81e5E0254c042a61a24f3fE67D2d77E2Fb0F158E#code) |
 | PlaceNftFactory | [`0xE5A54D2984F10EC21257C9C2491a54567C376322`](https://sepolia.basescan.org/address/0xE5A54D2984F10EC21257C9C2491a54567C376322#code) |
 | PlaceNftSwapper | [`0xDCFB2449E7F0562d064F71b83A2A5412168DbACc`](https://sepolia.basescan.org/address/0xDCFB2449E7F0562d064F71b83A2A5412168DbACc#code) |
-| PlaceNftCollection (implementation) | [`0x5Ad1008D5c9F52D35491815812c8147D7580CeD7`](https://sepolia.basescan.org/address/0x5Ad1008D5c9F52D35491815812c8147D7580CeD7#code) |
+| PlaceNftCollection (implementation, replaced, see below) | [`0x5Ad1008D5c9F52D35491815812c8147D7580CeD7`](https://sepolia.basescan.org/address/0x5Ad1008D5c9F52D35491815812c8147D7580CeD7#code) |
 | PlacePriceGuard | [`0x3db045168Ffbce897049Edaa4701f7dD57E2a392`](https://sepolia.basescan.org/address/0x3db045168Ffbce897049Edaa4701f7dD57E2a392#code) |
 | PlaceRewardTokenRegistry (reused from 0.3.0) | [`0xF2941258d77903409DEc6746A9668Aa84D3899A0`](https://sepolia.basescan.org/address/0xF2941258d77903409DEc6746A9668Aa84D3899A0#code) |
 | PlaceStaking (reused from 0.3.0) | [`0x693dd75b148a12c3d90935ea6354C5d1e2629283`](https://sepolia.basescan.org/address/0x693dd75b148a12c3d90935ea6354C5d1e2629283#code) |
 
-### PlaceNftCollection template update — pending deploy
+### PlaceNftCollection template update
 
-A new `PlaceNftCollection` template, set with `PlaceNftFactory.setImplementation` by the factory owner
+Deployed 2026-11-19, blocks 60594342–60594345, 2 transactions, both successful: a new `PlaceNftCollection` template
+and `PlaceNftFactory.setImplementation` by the factory owner (the platform wallet)
 ([`script/NftCollectionTemplate.s.sol`](script/NftCollectionTemplate.s.sol)). Change: a mint's own NFTs count as
 holders, so the holders share of the very first mint joins the 30-day holders pool (it went to the creator before);
 only royalties split while the collection has no NFT still give the holders share to the creator. New collections
@@ -46,10 +47,12 @@ use the new template; existing collections are clones of `0x5Ad1…CeD7` and kee
 
 | Contract | Address |
 |---|---|
-| PlaceNftCollection (implementation, new) | pending deploy |
+| PlaceNftCollection (implementation, current) | [`0x1d4185007663073A867c42e331e95fE8487ea39E`](https://sepolia.basescan.org/address/0x1d4185007663073A867c42e331e95fE8487ea39E#code) |
+| PlaceNftCollection (implementation, previous) | [`0x5Ad1008D5c9F52D35491815812c8147D7580CeD7`](https://sepolia.basescan.org/address/0x5Ad1008D5c9F52D35491815812c8147D7580CeD7#code) |
 
-On broadcast the script writes the address to `deployments/base-sepolia-0.3.1.json` (`nftCollectionImplementation`)
-and to `deployments/base-sepolia-0.3.1-nft-template.json` (with the previous template).
+Not yet verified on Basescan. Machine-readable: `nftCollectionImplementation` in
+[`deployments/base-sepolia-0.3.1.json`](deployments/base-sepolia-0.3.1.json), history in
+[`deployments/base-sepolia-0.3.1-nft-template.json`](deployments/base-sepolia-0.3.1-nft-template.json).
 
 ## Base Sepolia (84532) — 0.3.0-testnet (superseded)
 

@@ -1,0 +1,8 @@
+{
+  "chainId": 84532,
+  "change": "holders share of the first mint joins the holders pool",
+  "nftCollectionImplementation": "0x1d4185007663073A867c42e331e95fE8487ea39E",
+  "nftFactory": "0xE5A54D2984F10EC21257C9C2491a54567C376322",
+  "previousNftCollectionImplementation": "0x5Ad1008D5c9F52D35491815812c8147D7580CeD7",
+  "startBlock": 60594105
+}
