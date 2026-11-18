@@ -37,7 +37,10 @@ interface IWETH9 {
 ///             portions. A portion accrues at 00:00 UTC to every NFT that exists at that moment, equally per NFT.
 ///             A new income re-spreads what is left plus the income over the next `POOL_DAYS` days (the
 ///             StakingRewards rate / period-finish scheme, by whole UTC days); the pool ends `POOL_DAYS` days
-///             after the last income. Income that arrives while no NFT exists goes to the creator.
+///             after the last income. A mint's own NFTs count, so the holders share of the very first mint joins
+///             the pool too (its first portion accrues at the next 00:00 UTC, when they exist). Only income that
+///             arrives while no NFT exists and none is being minted (royalties sent to an empty collection) goes
+///             to the creator: a pool with no NFT would leave its daily portions unclaimable.
 ///           * A holders share in another asset is swapped into the reward token in the same transaction and
 ///             joins the pool when the swap happens.
 ///           * Burn: payments in the pair token are burned at once; the ETH part buys the pair token in the same
@@ -432,13 +435,14 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
 
     // ───────────────────────────── Internals ─────────────────────────────
 
-    /// @dev Accrues the pool, splits royalties and the payment (holders share to the creator if no NFT exists yet),
+    /// @dev Accrues the pool, splits royalties and the payment (the NFTs of this mint count as holders),
     ///      runs the waiting swaps, then mints.
     function _settleMint(address to, uint256 quantity, address asset, uint256 paid) internal returns (uint256 first) {
         _accrue();
-        uint256 holdersBefore = totalMinted;
-        _splitEthRoyalties(asset == ETH ? paid : 0, holdersBefore);
-        if (paid != 0) _split(asset, paid, false, holdersBefore);
+        // The pool pays from the next 00:00 UTC, when this mint's NFTs exist: they count as holders already.
+        uint256 holdersAfter = uint256(totalMinted) + quantity;
+        _splitEthRoyalties(asset == ETH ? paid : 0, holdersAfter);
+        if (paid != 0) _split(asset, paid, false, holdersAfter);
         _processPending();
         first = _mintMany(to, quantity);
         emit Minted(to, first, quantity, asset, paid);
@@ -530,8 +534,8 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
         _split(ETH, amount, true, holders);
     }
 
-    /// @dev Splits `amount` of `asset` (ETH or the pair token) the contract holds. `holders`: the NFT count; with
-    ///      none the holders share goes to the creator.
+    /// @dev Splits `amount` of `asset` (ETH or the pair token) the contract holds. `holders`: the NFTs that will
+    ///      exist when the pool next pays (a mint counts its own); with none the holders share goes to the creator.
     function _split(address asset, uint256 amount, bool royalty, uint256 holders) internal {
         Economy memory e = _economy;
         uint256 platform = amount * PLATFORM_BPS / BPS;

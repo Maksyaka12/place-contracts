@@ -36,6 +36,21 @@ Machine-readable: [`deployments/base-sepolia-0.3.1.json`](deployments/base-sepol
 | PlaceRewardTokenRegistry (reused from 0.3.0) | [`0xF2941258d77903409DEc6746A9668Aa84D3899A0`](https://sepolia.basescan.org/address/0xF2941258d77903409DEc6746A9668Aa84D3899A0#code) |
 | PlaceStaking (reused from 0.3.0) | [`0x693dd75b148a12c3d90935ea6354C5d1e2629283`](https://sepolia.basescan.org/address/0x693dd75b148a12c3d90935ea6354C5d1e2629283#code) |
 
+### PlaceNftCollection template update — pending deploy
+
+A new `PlaceNftCollection` template, set with `PlaceNftFactory.setImplementation` by the factory owner
+([`script/NftCollectionTemplate.s.sol`](script/NftCollectionTemplate.s.sol)). Change: a mint's own NFTs count as
+holders, so the holders share of the very first mint joins the 30-day holders pool (it went to the creator before);
+only royalties split while the collection has no NFT still give the holders share to the creator. New collections
+use the new template; existing collections are clones of `0x5Ad1…CeD7` and keep the previous rule.
+
+| Contract | Address |
+|---|---|
+| PlaceNftCollection (implementation, new) | pending deploy |
+
+On broadcast the script writes the address to `deployments/base-sepolia-0.3.1.json` (`nftCollectionImplementation`)
+and to `deployments/base-sepolia-0.3.1-nft-template.json` (with the previous template).
+
 ## Base Sepolia (84532) — 0.3.0-testnet (superseded)
 
 Deployed 2026-11-16, blocks 59718515–59718596, [`script/V6Sepolia.s.sol`](script/V6Sepolia.s.sol) (wraps

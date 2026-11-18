@@ -145,6 +145,11 @@ contract NftCollectionTest is LaunchFixture {
         vm.roll(vm.getBlockNumber() + 1);
     }
 
+    /// @dev The holders share of a payment of `amount` in the default 50 / 30 / 20 economy.
+    function _holdersShare(uint256 amount) internal pure returns (uint256) {
+        return (amount - amount * 2_000 / 10_000) * 3_000 / 10_000;
+    }
+
     function _assertSolvent() internal view {
         assertGe(address(c).balance, c.reserved(ETH), "ETH solvent");
         assertGe(IERC20(token).balanceOf(address(c)), c.reserved(token), "token solvent");
@@ -262,26 +267,62 @@ contract NftCollectionTest is LaunchFixture {
 
     // ───────────────────────────── ETH economy ─────────────────────────────
 
-    /// @notice The first mint has no holders: their share goes to the creator; the burn share buys and burns the
-    ///         pair token in the same transaction.
-    function test_firstMint_holdersShareToCreator_burnAtOnce() public {
+    /// @notice The first mint funds the holders pool (its own NFTs are the holders): the minter gets nothing on the
+    ///         mint day and its share from the next 00:00 UTC; the burn share buys and burns the pair token at once.
+    function test_firstMint_fundsPool_minterEarnsFromNextDay() public {
         uint256 deadBefore = IERC20(token).balanceOf(DEAD);
         _mint(ALICE, 2); // 0.002 ETH
+        uint64 today = uint64(vm.getBlockTimestamp() / 1 days);
         assertEq(c.platformOwed(ETH), 0.0004 ether, "20%");
-        assertEq(c.creatorOwed(ETH), 0.00128 ether, "50% + the 30% holders share of 80%");
+        assertEq(c.creatorOwed(ETH), 0.0008 ether, "50% of 80%, nothing more");
+        assertEq(c.rewardRate(), uint256(0.00048 ether) * 1e36 / 30, "30% of 80% into the pool");
+        assertEq(c.periodFinish(), today + 30);
         assertEq(c.buybackPending(), 0, "burn share swapped in the mint");
         assertGt(c.totalBurned(), 0);
         assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, c.totalBurned());
-        assertEq(_reward(1) + _reward(2), 0, "the minter gets nothing back");
+        assertEq(_reward(1) + _reward(2), 0, "nothing on the mint day");
         assertEq(c.reserved(ETH), 0.00168 ether);
         assertEq(address(c).balance, 0.00168 ether);
+
+        _days(1);
+        assertEq(_reward(1), 0.00048 ether / 30 / 2, "first portion at the next 00:00 UTC");
+        assertEq(_reward(2), 0.00048 ether / 30 / 2);
+        _days(30);
+        assertEq(_reward(1) + _reward(2), 0.00048 ether, "the minter gets the whole holders share back");
+        uint256 aliceBefore = ALICE.balance;
+        uint256[] memory ids = new uint256[](2);
+        (ids[0], ids[1]) = (1, 2);
+        vm.prank(ALICE);
+        c.claim(ids);
+        assertEq(ALICE.balance - aliceBefore, 0.00048 ether);
 
         uint256 platformBefore = PLATFORM.balance;
         c.payOut(ETH);
         assertEq(PLATFORM.balance - platformBefore, 0.0004 ether);
-        assertEq(CREATOR.balance, 0.00128 ether);
+        assertEq(CREATOR.balance, 0.0008 ether);
         vm.expectRevert(PlaceNftCollection.NothingToDo.selector);
         c.payOut(ETH);
+        assertEq(c.reserved(ETH), 0, "nothing stranded");
+        _assertSolvent();
+    }
+
+    /// @notice A first mint of several NFTs spreads its holders share over all of them, equally per NFT.
+    function test_firstMint_manyNftsShareThePool() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 4); // 4 x 0.00024 ETH into the pool, 4 NFTs from tomorrow
+        assertEq(c.rewardRate(), uint256(0.00096 ether) * 1e36 / 30);
+        _days(1);
+        for (uint256 id = 1; id <= 4; id++) {
+            assertEq(_reward(id), 0.00096 ether / 30 / 4, "equal per NFT");
+        }
+        vm.prank(ALICE);
+        c.transferFrom(ALICE, BOB, 4); // the day accrued stays with ALICE
+        _days(30);
+        for (uint256 id = 1; id <= 3; id++) {
+            assertEq(_reward(id), 0.00024 ether);
+        }
+        assertEq(_reward(4), 0.00024 ether - 0.00096 ether / 30 / 4, "BOB from the transfer on");
+        assertEq(c.credit(ALICE), 0.00096 ether / 30 / 4);
         _assertSolvent();
     }
 
@@ -289,20 +330,21 @@ contract NftCollectionTest is LaunchFixture {
     ///         to every NFT that exists at 00:00, and nothing more after the 30th day.
     function test_pool_paysOverThirtyDays() public {
         _toNextDayAt(12 hours);
-        _mint(ALICE, 1); // first mint: holders share to the creator, pool empty
-        assertEq(c.rewardRate(), 0);
-        _mint(BOB, 1); // 0.00024 ETH into the pool (one NFT existed); BOB's NFT also earns from tomorrow
+        _mint(ALICE, 1); // 0.00024 ETH into the pool: the first mint's NFT is its holder
         uint64 today = uint64(vm.getBlockTimestamp() / 1 days);
         assertEq(c.periodFinish(), today + 30);
         assertEq(c.rewardRate(), uint256(0.00024 ether) * 1e36 / 30);
+        _mint(BOB, 1); // + 0.00024 ETH the same day; BOB's NFT also earns from tomorrow
+        assertEq(c.periodFinish(), today + 30);
+        assertEq(c.rewardRate(), uint256(0.00048 ether) * 1e36 / 30);
         assertEq(_reward(1), 0, "nothing accrues on the income day");
         _days(1);
-        assertEq(_reward(1), 0.00024 ether / 30 / 2);
-        assertEq(_reward(2), 0.00024 ether / 30 / 2);
+        assertEq(_reward(1), 0.00048 ether / 30 / 2);
+        assertEq(_reward(2), 0.00048 ether / 30 / 2);
         _days(29);
-        assertApproxEqAbs(_reward(1), 0.00012 ether, 1);
+        assertApproxEqAbs(_reward(1), 0.00024 ether, 1);
         _days(10);
-        assertApproxEqAbs(_reward(1), 0.00012 ether, 1, "the pool ended after 30 days");
+        assertApproxEqAbs(_reward(1), 0.00024 ether, 1, "the pool ended after 30 days");
         uint256 before = ALICE.balance;
         vm.prank(ALICE);
         uint256 paid = c.claim(_ids(1));
@@ -315,21 +357,22 @@ contract NftCollectionTest is LaunchFixture {
     function test_pool_secondIncomeAfterOneDay() public {
         _toNextDayAt(12 hours);
         _mint(ALICE, 1);
-        _mint(BOB, 1); // X = 0.00024 over 2 NFTs
+        _mint(BOB, 1); // X = 0.00048 (both mints) over 2 NFTs
         _days(1); // day 1: X/30 accrued
-        _mint(CAROL, 1); // Y = 0.00024 (2 NFTs before it), pool = 29X/30 + Y over 30 days, 3 NFTs from now
+        _mint(CAROL, 1); // Y = 0.00024, pool = 29X/30 + Y over 30 days, 3 NFTs from now
         uint64 today = uint64(vm.getBlockTimestamp() / 1 days);
         assertEq(c.periodFinish(), today + 30);
-        uint256 x = 0.00024 ether;
-        assertApproxEqAbs(c.rewardRate(), (x * 29 / 30 + x) * 1e36 / 30, 1e36);
+        uint256 x = 0.00048 ether;
+        uint256 y = 0.00024 ether;
+        assertApproxEqAbs(c.rewardRate(), (x * 29 / 30 + y) * 1e36 / 30, 1e36);
         uint256 firstDay = x / 30 / 2;
         assertEq(_reward(1), firstDay);
         assertEq(_reward(3), 0, "CAROL gets nothing from the day already accrued");
         _days(30);
-        uint256 rest = (x * 29 / 30 + x) / 3;
+        uint256 rest = (x * 29 / 30 + y) / 3;
         assertApproxEqAbs(_reward(1), firstDay + rest, 3);
         assertApproxEqAbs(_reward(3), rest, 3, "but shares the running pool equally");
-        assertApproxEqAbs(_reward(1) + _reward(2) + _reward(3), 2 * x, 10, "every income is paid in full");
+        assertApproxEqAbs(_reward(1) + _reward(2) + _reward(3), x + y, 10, "every income is paid in full");
         _assertSolvent();
     }
 
@@ -337,26 +380,27 @@ contract NftCollectionTest is LaunchFixture {
     function test_pool_secondIncomeAfterThirtyDays() public {
         _toNextDayAt(12 hours);
         _mint(ALICE, 1);
-        _mint(BOB, 1); // X over 2 NFTs
+        _mint(BOB, 1); // X (both mints) over 2 NFTs
         _days(30);
-        uint256 x = 0.00024 ether;
+        uint256 x = 0.00048 ether;
+        uint256 y = 0.00024 ether;
         assertApproxEqAbs(_reward(1), x / 2, 1);
         _mint(CAROL, 1); // Y alone over the next 30 days, 3 NFTs
-        assertEq(c.rewardRate(), x * 1e36 / 30);
+        assertEq(c.rewardRate(), y * 1e36 / 30);
         _days(30);
-        assertApproxEqAbs(_reward(1), x / 2 + x / 3, 2);
-        assertApproxEqAbs(_reward(3), x / 3, 2);
+        assertApproxEqAbs(_reward(1), x / 2 + y / 3, 2);
+        assertApproxEqAbs(_reward(3), y / 3, 2);
         _assertSolvent();
     }
 
     /// @notice 5 -> 10 -> 50 NFTs: equal per NFT at each daily accrual; the newest NFTs miss the days before them.
     function test_pool_perNftAsTheCollectionGrows() public {
         _toNextDayAt(12 hours);
-        _mint(ALICE, 5); // first mint: to the creator
-        _mint(BOB, 5); // X = 0.0012
+        _mint(ALICE, 5); // 0.0012 into the pool
+        _mint(BOB, 5); // + 0.0012 the same day: X = 0.0024
         _days(10); // 10 days of X/30 over 10 NFTs
         _mint(CAROL, 40); // Y = 0.0096, 50 NFTs from tomorrow
-        uint256 x = 0.0012 ether;
+        uint256 x = 0.0024 ether;
         uint256 tenDays = x / 30 * 10 / 10;
         assertApproxEqAbs(_reward(1), tenDays, 1);
         assertApproxEqAbs(_reward(6), tenDays, 1, "BOB shares the pool from the first accrual after his mint");
@@ -373,7 +417,7 @@ contract NftCollectionTest is LaunchFixture {
         _toNextDayAt(12 hours);
         _mint(ALICE, 1);
         _mint(BOB, 1);
-        uint256 perDay = 0.00024 ether / 30 / 2;
+        uint256 perDay = 0.00048 ether / 30 / 2;
         _days(5);
         vm.prank(ALICE);
         c.transferFrom(ALICE, CAROL, 1);
@@ -404,9 +448,9 @@ contract NftCollectionTest is LaunchFixture {
         vm.warp(vm.getBlockTimestamp() + 1); // 23:59:59
         assertEq(_reward(1), 0);
         vm.warp(vm.getBlockTimestamp() + 1); // 00:00:00
-        assertEq(_reward(1), 0.00024 ether / 30 / 2);
+        assertEq(_reward(1), 0.00048 ether / 30 / 2);
         vm.warp(vm.getBlockTimestamp() + 1 days - 1); // 23:59:59 of the same day
-        assertEq(_reward(1), 0.00024 ether / 30 / 2, "one portion per day");
+        assertEq(_reward(1), 0.00048 ether / 30 / 2, "one portion per day");
     }
 
     /// @notice Odd amounts and NFT counts: holders never get more than the pool, and the dust left is tiny.
@@ -415,14 +459,13 @@ contract NftCollectionTest is LaunchFixture {
         p.mintPrice = 0.000777777777777777 ether;
         c = _create(CREATOR, p);
         _toNextDayAt(12 hours);
-        _mint(ALICE, 3);
-        _mint(BOB, 4); // income over 3 NFTs, then 7 NFTs accrue
+        _mint(ALICE, 3); // first income, 3 NFTs
+        _mint(BOB, 4); // second income the same day, then 7 NFTs accrue
         _days(3);
-        _mint(CAROL, 2); // second income
+        _mint(CAROL, 2); // third income
         _days(31);
-        uint256 paid = uint256(0.000777777777777777 ether) * 6;
-        uint256 rest = paid - paid * 2_000 / 10_000;
-        uint256 income = rest * 3_000 / 10_000; // BOB's and CAROL's mints
+        uint256 income =
+            _holdersShare(p.mintPrice * 3) + _holdersShare(p.mintPrice * 4) + _holdersShare(p.mintPrice * 2); // every mint, the first one too
         uint256 sum;
         for (uint256 id = 1; id <= 9; id++) {
             sum += _reward(id);
@@ -528,14 +571,15 @@ contract NftCollectionTest is LaunchFixture {
         PlaceNftCollection.InitParams memory p = _p();
         p.rewardToken = address(usd);
         c = _create(CREATOR, p);
-        _mint(ALICE, 1);
-        _mint(BOB, 1); // 0.00024 ETH -> ~0.48 USD into the pool
+        _mint(ALICE, 1); // 0.00024 ETH -> ~0.48 USD into the pool
+        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.48e18, 0.02e18, "1 ETH ~ 2000 USD, minus the pool fee");
+        _mint(BOB, 1); // another ~0.48 USD
         assertEq(c.pendingHolders(ETH), 0);
         assertEq(c.buybackPending(), 0);
-        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.48e18, 0.02e18, "1 ETH ~ 2000 USD, minus the pool fee");
+        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.96e18, 0.02e18);
         _days(30);
         uint256 r = _reward(1);
-        assertApproxEqRel(r, 0.24e18, 0.02e18, "half of the pool over 2 NFTs");
+        assertApproxEqRel(r, 0.48e18, 0.02e18, "half of the pool over 2 NFTs");
         vm.prank(ALICE);
         c.claim(_ids(1));
         assertEq(usd.balanceOf(ALICE), r);
@@ -545,10 +589,15 @@ contract NftCollectionTest is LaunchFixture {
     /// @notice Paid in the pair token, holders paid in ETH: the token share is sold through the launch pool.
     function test_rewardToken_tokenPaymentSwappedToEth() public {
         _mint(ALICE, 1);
-        _mintToken(ALICE, 1);
+        uint256 ethPool = c.rewardRate();
+        assertEq(ethPool, uint256(0.00024 ether) * 1e36 / 30, "the first ETH mint funds the pool directly");
+        _mintToken(ALICE, 1); // the same day: re-spreads the whole pool plus the swapped share
         assertEq(c.pendingHolders(token), 0);
         assertApproxEqRel(
-            c.rewardRate() * 30 / 1e36, 0.00024 ether, 0.05e18, "the ETH value of the token share, minus tax and fees"
+            (c.rewardRate() - ethPool) * 30 / 1e36,
+            0.00024 ether,
+            0.05e18,
+            "the ETH value of the token share, minus tax and fees"
         );
         _assertSolvent();
     }
@@ -558,10 +607,12 @@ contract NftCollectionTest is LaunchFixture {
         PlaceNftCollection.InitParams memory p = _p();
         p.rewardToken = address(usd);
         c = _create(CREATOR, p);
-        _mint(ALICE, 1);
-        _mintToken(ALICE, 1);
+        _mint(ALICE, 1); // ETH -> USD
+        uint256 ethPool = c.rewardRate();
+        assertApproxEqRel(ethPool * 30 / 1e36, 0.48e18, 0.02e18);
+        _mintToken(ALICE, 1); // token -> ETH -> USD
         assertEq(c.pendingHolders(token), 0);
-        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.48e18, 0.06e18);
+        assertApproxEqRel((c.rewardRate() - ethPool) * 30 / 1e36, 0.48e18, 0.06e18);
         _assertSolvent();
     }
 
@@ -574,9 +625,11 @@ contract NftCollectionTest is LaunchFixture {
         assertFalse(c.official());
 
         uint256 deadBefore = usd.balanceOf(DEAD);
-        _mint(ALICE, 1); // first mint: the ETH burn share buys USD and burns it
+        _mint(ALICE, 1); // first mint: the ETH burn share buys USD and burns it, the holders share joins the pool
         uint256 burnedByEth = usd.balanceOf(DEAD) - deadBefore;
         assertApproxEqRel(burnedByEth, 0.00016 ether * 2000, 0.02e18);
+        uint256 ethPool = c.rewardRate();
+        assertEq(ethPool, uint256(0.00024 ether) * 1e36 / 30);
 
         usd.mint(BOB, 100e18);
         uint256 due = c.quoteTokenPrice(1);
@@ -586,7 +639,7 @@ contract NftCollectionTest is LaunchFixture {
         assertEq(usd.balanceOf(DEAD) - deadBefore - burnedByEth, rest * 2_000 / 10_000, "USD burn share at once");
         assertEq(c.totalBurned(), usd.balanceOf(DEAD) - deadBefore);
         // The USD holders share was sold for ETH (the reward token) in the same mint.
-        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.00024 ether, 0.02e18);
+        assertApproxEqRel((c.rewardRate() - ethPool) * 30 / 1e36, 0.00024 ether, 0.02e18);
         _assertSolvent();
     }
 
@@ -598,14 +651,18 @@ contract NftCollectionTest is LaunchFixture {
         PlaceNftCollection.InitParams memory p = _p();
         p.rewardToken = token; // holders paid in the pair token
         c = _create(CREATOR, p);
-        _mint(ALICE, 1);
+        _toNextDayAt(12 hours); // every mint below on one UTC day
+        _mint(ALICE, 1); // fair price: the first mint's ETH share is swapped into the pool at once
+        uint256 firstPool = c.rewardRate();
+        assertGt(firstPool, 0);
+        assertEq(c.pendingHolders(ETH), 0);
         _next();
         _swap(ATTACKER, key, token, true, 0.05 ether); // pump: spot > 3% off the reference
         _mint(BOB, 1);
         _mint(CAROL, 1);
         assertEq(c.pendingHolders(ETH), 0.00024 ether + 0.00024 ether);
         assertEq(c.buybackPending(), 0.00032 ether);
-        assertEq(c.rewardRate(), 0, "nothing in the pool before the swap");
+        assertEq(c.rewardRate(), firstPool, "nothing added to the pool before the swap");
 
         _swap(ATTACKER, key, token, false, IERC20(token).balanceOf(ATTACKER)); // price back in the band
         _next();
@@ -615,7 +672,7 @@ contract NftCollectionTest is LaunchFixture {
         assertEq(c.buybackPending(), 0, "waiting burn ran");
         assertGt(IERC20(token).balanceOf(DEAD) - deadBefore, 0);
         uint256 funded = c.rewardRate() * 30 / 1e36;
-        assertGt(funded, 0);
+        assertGt(c.rewardRate(), firstPool);
         _days(30);
         assertApproxEqAbs(_reward(1), funded / 4, 4, "4 NFTs exist at every accrual after the swap");
         _assertSolvent();
@@ -629,7 +686,7 @@ contract NftCollectionTest is LaunchFixture {
         p.maxSupply = 3;
         c = _create(CREATOR, p);
         _toNextDayAt(12 hours);
-        _mint(ALICE, 2);
+        _mint(ALICE, 2); // 0.00048 into the pool
         (address receiver, uint256 amount) = c.royaltyInfo(1, 1 ether);
         assertEq(receiver, address(c));
         assertEq(amount, 0.05 ether);
@@ -637,11 +694,12 @@ contract NftCollectionTest is LaunchFixture {
         vm.deal(address(this), 1 ether);
         (bool ok,) = address(c).call{value: 0.05 ether}(""); // a marketplace pays the royalty
         assertTrue(ok);
-        assertEq(c.rewardRate(), 0, "nothing split yet");
+        assertEq(c.rewardRate(), uint256(0.00048 ether) * 1e36 / 30, "royalty not split yet");
         uint256 creatorBefore = c.creatorOwed(ETH);
         _mint(BOB, 1); // sold out
         assertEq(c.creatorOwed(ETH) - creatorBefore, 0.02 ether + 0.0004 ether);
-        uint256 x = 0.012 ether + 0.00024 ether; // 30% of 80% of the royalty and of the mint
+        // The first mint's share (the same day) plus 30% of 80% of the royalty and of this mint.
+        uint256 x = 0.00048 ether + 0.012 ether + 0.00024 ether;
         assertEq(c.rewardRate(), x * 1e36 / 30);
 
         // Sold out: anyone splits later royalties into the pool.
@@ -658,14 +716,19 @@ contract NftCollectionTest is LaunchFixture {
     function test_royalties_wethTokenAndOtherAssets() public {
         MockWETH weth = new MockWETH();
         nftFactory.setWeth(address(weth));
-        _mint(ALICE, 1);
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 1); // 0.00024 into the pool
         weth.deposit{value: 0.01 ether}();
         weth.transfer(address(c), 0.01 ether);
         uint256 creatorBefore = c.creatorOwed(ETH);
         assertEq(c.processPending(address(weth)), 0.01 ether);
         assertEq(weth.balanceOf(address(c)), 0);
         assertEq(c.creatorOwed(ETH) - creatorBefore, 0.004 ether);
-        assertEq(c.rewardRate(), uint256(0.0024 ether) * 1e36 / 30, "30% of 80% into the pool");
+        assertEq(
+            c.rewardRate(),
+            uint256(0.00024 ether + 0.0024 ether) * 1e36 / 30,
+            "the mint's share + 30% of 80% into the pool"
+        );
 
         // Royalty in the pair token: its burn share is burned at once.
         uint256 deadBefore = IERC20(token).balanceOf(DEAD);
@@ -712,7 +775,91 @@ contract NftCollectionTest is LaunchFixture {
         uint256 rest = due - platform;
         assertEq(c.platformOwed(token), platform);
         assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, rest * 2_000 / 10_000, "token burn share burned");
-        assertEq(c.creatorOwed(token), rest - rest * 2_000 / 10_000, "first mint: holders share to the creator");
+        assertEq(c.creatorOwed(token), rest - rest * 2_000 / 10_000 - rest * 3_000 / 10_000, "50% to the creator");
+        assertEq(c.pendingHolders(token), 0, "first mint: the holders share is swapped into the pool");
+        assertGt(c.rewardRate(), 0);
+        _assertSolvent();
+    }
+
+    // ───────────────────────────── empty collection ─────────────────────────────
+
+    /// @notice ETH royalties split while no NFT exists and none is minted: the holders share goes to the creator
+    ///         (a pool without NFTs could never pay out); the next mint's pool holds only its own share.
+    function test_royalties_ethOnEmptyCollection_holdersShareToCreator() public {
+        _toNextDayAt(12 hours);
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(c).call{value: 0.05 ether}("");
+        assertTrue(ok);
+        assertEq(c.processPending(ETH), 0.05 ether);
+        assertEq(c.platformOwed(ETH), 0.01 ether);
+        assertEq(c.creatorOwed(ETH), 0.032 ether, "50% + the 30% holders share of 80%");
+        assertEq(c.rewardRate(), 0, "pool empty");
+        assertEq(c.periodFinish(), 0);
+        assertEq(c.pendingHolders(ETH), 0);
+        assertEq(c.buybackPending(), 0, "burn share bought and burned");
+        assertEq(c.reserved(ETH), 0.042 ether);
+        _assertSolvent();
+
+        _days(2);
+        _mint(ALICE, 1);
+        assertEq(c.rewardRate(), uint256(0.00024 ether) * 1e36 / 30, "only the mint's own share");
+        _days(31);
+        assertEq(_reward(1), 0.00024 ether);
+        c.payOut(ETH);
+        assertEq(CREATOR.balance, 0.032 ether + 0.0004 ether);
+        vm.prank(ALICE);
+        c.claim(_ids(1));
+        assertEq(c.reserved(ETH), 0, "nothing stranded");
+        _assertSolvent();
+    }
+
+    /// @notice Mints over several days, a royalty and transfers: after the pool ends every holders income is paid
+    ///         out to the wei, and once everyone claims and the creator and platform are paid, nothing stays reserved
+    ///         beyond rounding dust.
+    function test_pool_solventAfterThirtyDays_noStrandedRewards() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 3); // first mint: funds the pool
+        _days(5);
+        _mint(BOB, 2);
+        vm.prank(ALICE);
+        c.transferFrom(ALICE, CAROL, 2);
+        _days(2);
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(c).call{value: 0.01 ether}("");
+        assertTrue(ok);
+        c.processPending(ETH);
+        uint256 income = _holdersShare(0.003 ether) + _holdersShare(0.002 ether) + _holdersShare(0.01 ether);
+        _assertSolvent();
+        _days(31);
+        uint64 today = uint64(vm.getBlockTimestamp() / 1 days);
+        assertLt(c.periodFinish(), today, "the pool ended");
+
+        uint256 sum;
+        for (uint256 id = 1; id <= 5; id++) {
+            sum += _reward(id);
+        }
+        sum += c.credit(ALICE); // NFT 2 before the transfer
+        assertLe(sum, income, "never more than the pool");
+        assertLe(income - sum, 10, "dust of a few wei");
+
+        uint256[] memory ids = new uint256[](2);
+        (ids[0], ids[1]) = (1, 3);
+        vm.prank(ALICE);
+        c.claim(ids);
+        vm.prank(CAROL);
+        c.claim(_ids(2));
+        (ids[0], ids[1]) = (4, 5);
+        vm.prank(BOB);
+        c.claim(ids);
+        c.payOut(ETH);
+        assertEq(c.buybackPending(), 0);
+        assertEq(c.credit(ALICE) + c.credit(BOB) + c.credit(CAROL), 0);
+        assertEq(address(c).balance, c.reserved(ETH), "nothing unaccounted");
+        assertLe(c.reserved(ETH), 10, "only rounding dust stays");
+        _days(30);
+        for (uint256 id = 1; id <= 5; id++) {
+            assertEq(_reward(id), 0, "nothing accrues after the end");
+        }
         _assertSolvent();
     }
 

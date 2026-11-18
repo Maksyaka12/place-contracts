@@ -49,7 +49,9 @@ no pair. A collection made by the pair token's creator is marked **official**.
 - **Holders pool**: the holders share, in the **reward token** the creator picked (ETH, the pair token, or any token
   with a registry route from ETH), is paid out over 30 days. Every day at 00:00 UTC a portion accrues equally to each
   NFT that exists at that moment; a new income re-spreads what is left plus the income over the next 30 days. No
-  keeper: any transaction catches up on the days passed. Income that arrives before the first NFT goes to the creator.
+  keeper: any transaction catches up on the days passed. A mint's own NFTs count as holders, so the very first mint
+  funds the pool too (its NFTs earn from the next 00:00 UTC). Only income that arrives while no NFT exists and none is
+  being minted (royalties sent to an empty collection) goes to the creator.
   What an NFT accrued stays with the seller when it changes hands; owners claim at any time.
 - In the mint transaction the holders share is swapped into the reward token and the burn share buys the pair token
   and burns it (pair-token payments burn at once). If a swap cannot run safely the mint still succeeds and the amount
