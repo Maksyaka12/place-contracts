@@ -3,7 +3,40 @@
 Every Place Launch deployment gets a row here. The hub contracts (`PlaceHub`, `PlaceConfig`) live in
 [`place-web/contracts/DEPLOYMENTS.md`](https://github.com/Maksyaka12/place-web/blob/dev/contracts/DEPLOYMENTS.md).
 
-## Base Sepolia (84532) — 0.3.0-testnet (current)
+## Base Sepolia (84532) — 0.3.1-testnet (current)
+
+Deployed 2026-11-18, blocks 60440625–60440716, [`script/V75Sepolia.s.sol`](script/V75Sepolia.s.sol) (wraps
+[`script/DeployPlaceLaunch.s.sol`](script/DeployPlaceLaunch.s.sol)), Foundry 1.8.5, solc 0.8.26 (via-IR, 200 runs),
+hardfork `base:Denim`. 31 transactions, all successful, gas ≈ 0.0002 ETH. Version **0.3.1-testnet** (not audited):
+the 0.3.0 launch suite again, with community vaults that fund NFT holder campaigns and buy back and burn their token,
+plus the NFT launchpad (`PlaceNftFactory`, `PlaceNftSwapper`, `PlacePriceGuard`, `PlaceNftCollection` clones).
+The reward-token registry and `PlaceStaking` of 0.3.0 are reused; the NFT factory recognises creators of both launch
+factories. Every owner role is held by the platform wallet `0x9F68…6fC4`. All 17 contracts are verified on Sourcify/Blockscout and
+all but `PlaceNftFactory` on Basescan (Basescan reports a bytecode mismatch for it; the Sourcify match is exact).
+Machine-readable: [`deployments/base-sepolia-0.3.1.json`](deployments/base-sepolia-0.3.1.json).
+
+| Contract | Address |
+|---|---|
+| PlaceLaunchFactory | [`0xdD38C9F751Bc6BBb0330aab770c0bc0D53C69873`](https://sepolia.basescan.org/address/0xdD38C9F751Bc6BBb0330aab770c0bc0D53C69873#code) |
+| PlaceLaunchHook | [`0x2ffc9585096f98fe675d85b5C74144590AF7EACc`](https://sepolia.basescan.org/address/0x2ffc9585096f98fe675d85b5C74144590AF7EACc#code) |
+| FeeEscrow | [`0xaD76d5828336f5b1A814C6326c7C9a4c1d2FdcD0`](https://sepolia.basescan.org/address/0xaD76d5828336f5b1A814C6326c7C9a4c1d2FdcD0#code) |
+| PlaceRewardsDistributor | [`0xc43ba7b756427F37073fBf8b3F71E990139c9518`](https://sepolia.basescan.org/address/0xc43ba7b756427F37073fBf8b3F71E990139c9518#code) |
+| PlaceCreatorVault (implementation) | [`0xEba25508D2F985F80e665F4BAE1C07C1878fE59a`](https://sepolia.basescan.org/address/0xEba25508D2F985F80e665F4BAE1C07C1878fE59a#code) |
+| PlaceCommunityVault (implementation) | [`0x9C05b6a1f37A9db82B47cCFDCDE7820E2eB8Bee4`](https://sepolia.basescan.org/address/0x9C05b6a1f37A9db82B47cCFDCDE7820E2eB8Bee4#code) |
+| XRecipientRegistry | [`0x6A61317AE1191380220578C9f70AD4de1708cC19`](https://sepolia.basescan.org/address/0x6A61317AE1191380220578C9f70AD4de1708cC19#code) |
+| PlaceLaunchBuyAdapter | [`0xC49394CC621d255f66Ba0b535192a02D356ad034`](https://sepolia.basescan.org/address/0xC49394CC621d255f66Ba0b535192a02D356ad034#code) |
+| AnnouncementRegistry | [`0xB68c1A4cf1Bbc861203f860096578E46950885aA`](https://sepolia.basescan.org/address/0xB68c1A4cf1Bbc861203f860096578E46950885aA#code) |
+| PlaceLaunchTokenDeployer | [`0x26CD582fD24440B51cCfa8032cC695f313EC268D`](https://sepolia.basescan.org/address/0x26CD582fD24440B51cCfa8032cC695f313EC268D#code) |
+| PlaceLaunchValidation | [`0x3994Fd86c8D672bEfbd6557F99331b073f703797`](https://sepolia.basescan.org/address/0x3994Fd86c8D672bEfbd6557F99331b073f703797#code) |
+| PlaceLaunchOperations (library) | [`0x81e5E0254c042a61a24f3fE67D2d77E2Fb0F158E`](https://sepolia.basescan.org/address/0x81e5E0254c042a61a24f3fE67D2d77E2Fb0F158E#code) |
+| PlaceNftFactory | [`0xE5A54D2984F10EC21257C9C2491a54567C376322`](https://sepolia.basescan.org/address/0xE5A54D2984F10EC21257C9C2491a54567C376322#code) |
+| PlaceNftSwapper | [`0xDCFB2449E7F0562d064F71b83A2A5412168DbACc`](https://sepolia.basescan.org/address/0xDCFB2449E7F0562d064F71b83A2A5412168DbACc#code) |
+| PlaceNftCollection (implementation) | [`0x5Ad1008D5c9F52D35491815812c8147D7580CeD7`](https://sepolia.basescan.org/address/0x5Ad1008D5c9F52D35491815812c8147D7580CeD7#code) |
+| PlacePriceGuard | [`0x3db045168Ffbce897049Edaa4701f7dD57E2a392`](https://sepolia.basescan.org/address/0x3db045168Ffbce897049Edaa4701f7dD57E2a392#code) |
+| PlaceRewardTokenRegistry (reused from 0.3.0) | [`0xF2941258d77903409DEc6746A9668Aa84D3899A0`](https://sepolia.basescan.org/address/0xF2941258d77903409DEc6746A9668Aa84D3899A0#code) |
+| PlaceStaking (reused from 0.3.0) | [`0x693dd75b148a12c3d90935ea6354C5d1e2629283`](https://sepolia.basescan.org/address/0x693dd75b148a12c3d90935ea6354C5d1e2629283#code) |
+
+## Base Sepolia (84532) — 0.3.0-testnet (superseded)
 
 Deployed 2026-11-16, blocks 59718515–59718596, [`script/V6Sepolia.s.sol`](script/V6Sepolia.s.sol) (wraps
 [`script/DeployPlaceLaunch.s.sol`](script/DeployPlaceLaunch.s.sol)), Foundry 1.8.5, solc 0.8.26 (via-IR, 200 runs).

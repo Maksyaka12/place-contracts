@@ -61,7 +61,7 @@ no pair. A collection made by the pair token's creator is marked **official**.
 
 ## Status
 
-Place Launch **0.3.0** (Standard and Economy launches, daily rewards, community pool) is on the `dev` branch and **not deployed yet**. Place Launch 0.2.0 is deployed to **Base Sepolia only**; addresses are in [`DEPLOYMENTS.md`](DEPLOYMENTS.md). The code is **not audited yet**. An audit is required before mainnet.
+Place Launch **0.3.1** (Standard and Economy launches, daily rewards, community pool, NFT launchpad) is deployed to **Base Sepolia only**; addresses of every release are in [`DEPLOYMENTS.md`](DEPLOYMENTS.md). The code is **not audited yet**. An audit is required before mainnet.
 
 ## Build
 
