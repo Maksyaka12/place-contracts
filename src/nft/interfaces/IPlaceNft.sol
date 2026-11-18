@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 
-/// @notice The part of PlacePriceGuard that collections and community vaults call.
+/// @notice The part of PlacePriceGuard that collections, the swapper and community vaults call.
 interface IPlacePriceGuard {
     struct Config {
         uint32 minInterval;
@@ -20,13 +20,24 @@ interface IPlacePriceGuard {
         returns (uint256 referenceOut, uint256 spotOut);
 }
 
-/// @notice The settings of PlaceNftFactory that its collections read.
+/// @notice The settings of PlaceNftFactory that its collections and its swapper read.
 interface IPlaceNftFactory {
     function isCollection(address collection) external view returns (bool);
     function platformRecipient() external view returns (address);
     function rewardRegistry() external view returns (address);
     function priceGuard() external view returns (address);
+    function swapper() external view returns (address);
     function weth() external view returns (address);
+}
+
+/// @notice PlaceNftSwapper: routes and guarded swaps of a factory's collections.
+interface IPlaceNftSwapper {
+    function swapFor(address input, uint256 amountIn, bool toPair) external payable returns (uint256 out);
+    function observeMint(address collection) external;
+    function quoteMint(address collection, uint256 ethAmount)
+        external
+        view
+        returns (uint256 referenceOut, uint256 spotOut);
 }
 
 /// @notice The views of a PlaceNftCollection that community vaults check before an NFT campaign.

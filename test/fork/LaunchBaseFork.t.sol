@@ -7,7 +7,7 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @notice Launches against real Base pairs (ETH, USDC, cbBTC, NVDAc) on a Base mainnet fork (Cobalt hardfork).
+/// @notice Launches against real Base pairs (ETH, USDC, cbBTC, NVDAc) on a Base mainnet fork (Denim hardfork).
 contract LaunchBaseForkTest is LaunchFixture {
     IPoolManager internal constant BASE_PM = IPoolManager(0x498581fF718922c3f8e6A244956aF099B2652b2b);
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;

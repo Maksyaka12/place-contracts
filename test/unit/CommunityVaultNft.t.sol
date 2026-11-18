@@ -50,6 +50,7 @@ contract CommunityVaultNftTest is LaunchFixture {
         p.baseURI = "ipfs://one";
         p.mintPrice = price;
         p.token = token;
+        p.launchPool = key;
         p.economy = PlaceNftCollection.Economy({creatorBps: 10_000, holdersBps: 0, burnBps: 0});
         uint256 fee = nftFactory.creationFee();
         vm.deal(who, who.balance + fee);

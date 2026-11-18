@@ -11,8 +11,8 @@ import {PlaceNftCollection} from "../src/nft/PlaceNftCollection.sol";
 import {PlaceNftFactory} from "../src/nft/PlaceNftFactory.sol";
 
 /// @notice Deploys Place Launch 0.3.1-testnet to Base Sepolia: the NFT launchpad (PlacePriceGuard, PlaceNftCollection
-///         template, PlaceNftFactory) and a new launch suite whose community vaults can fund NFT holders campaigns
-///         and buy back and burn their token. Community vaults are clones with an immutable template, so the suite
+///         template, PlaceNftFactory with its PlaceNftSwapper) and a new launch suite whose community vaults can
+///         fund NFT holders campaigns and buy back and burn their token. Community vaults are clones with an immutable template, so the suite
 ///         (factory, hook, escrow, distributor, vault templates) is deployed again; the 0.3.0 suite keeps working
 ///         for its launches. The reward-token registry and PlaceStaking of 0.3.0 are reused, and the NFT factory
 ///         recognises creators of both launch factories.
@@ -118,6 +118,7 @@ contract V75DeploySepolia is Script {
         vm.serializeAddress(o, "priceGuard", address(n.guard));
         vm.serializeAddress(o, "nftCollectionImplementation", address(n.collectionImplementation));
         vm.serializeAddress(o, "nftFactory", address(n.factory));
+        vm.serializeAddress(o, "nftSwapper", n.factory.swapper());
         vm.serializeAddress(o, "previousFactory", FACTORY_0_3_0);
         string memory json = vm.serializeAddress(o, "publisher", PUBLISHER);
         vm.writeJson(json, OUT_FILE);
@@ -125,6 +126,7 @@ contract V75DeploySepolia is Script {
         console.log("deployer", deployer);
         console.log("PlacePriceGuard", address(n.guard));
         console.log("PlaceNftFactory", address(n.factory));
+        console.log("PlaceNftSwapper", n.factory.swapper());
         console.log("PlaceNftCollection (implementation)", address(n.collectionImplementation));
     }
 }

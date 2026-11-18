@@ -7,9 +7,9 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
-# Base hardfork with the B20 precompiles (Cobalt). B20 itself only runs on a fork of
-# Base Sepolia or Base: locally `createB20` reverts with FeatureNotActivated.
-hardfork = "base:Cobalt"
+# Base hardfork with the B20 precompiles (Denim: 200 ms blocks, B20 transfers to the token itself revert).
+# B20 itself only runs on a fork of Base Sepolia or Base: locally `createB20` reverts with FeatureNotActivated.
+hardfork = "base:Denim"
 fs_permissions = [{ access = "read", path = "./" }, { access = "read-write", path = "./deployments" }]
 
 [fuzz]

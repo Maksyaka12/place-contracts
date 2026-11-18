@@ -120,9 +120,10 @@ contract B20ForkTest is Test, IUnlockCallback {
         // burn needs BURN_ROLE, even for one's own balance
         vm.expectRevert();
         t.burn(1e18);
-        // Denim rejects transfers to the token itself; Cobalt still accepts them
+        // Denim rejects transfers to the token itself on the live chains (eth_call on Base Sepolia reverts with
+        // 0x9cfea583), but forge 1.8.5 does not emulate that rule yet, so this only logs what the local EVM does.
         (bool ok,) = address(t).call(abi.encodeCall(IB20.transfer, (address(t), 1)));
-        console.log("transfer to token itself accepted:", ok);
+        console.log("transfer to token itself accepted locally:", ok);
     }
 
     function test_adminless_atCreation() public {

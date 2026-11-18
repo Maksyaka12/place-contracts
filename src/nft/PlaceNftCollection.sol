@@ -9,15 +9,12 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
 
-import {PlaceRouteSwapper} from "../place/PlaceRouteSwapper.sol";
-import {IPlaceRewardTokenRegistry} from "../place/interfaces/IPlaceRewardTokenRegistry.sol";
-import {IPlaceNftFactory, IPlacePriceGuard} from "./interfaces/IPlaceNft.sol";
+import {IPlaceNftFactory, IPlaceNftSwapper} from "./interfaces/IPlaceNft.sol";
 
 interface IWETH9 {
     function withdraw(uint256 amount) external;
@@ -25,25 +22,38 @@ interface IWETH9 {
 
 /// @title PlaceNftCollection
 /// @notice An ERC-721 collection of the Place NFT launchpad (a clone per collection, made by PlaceNftFactory).
+///         An NFT launch works like a token launch: the collection is paired with a token and has a mint economy.
 ///
-///         - **Kinds**: Unique (one metadata file per token: `baseURI + id + uriSuffix`, an IPFS folder) or Edition
-///           (one metadata URI for every token).
-///         - **Mint**: always in ETH at a fixed price; optionally also in the linked token, at the market equivalent
-///           of the ETH price at the moment of the mint (PlacePriceGuard: manipulation-resistant reference price,
-///           the buyer pays the larger of the reference and spot amounts).
-///         - **Economy** of every payment and of every royalty that reaches the contract (ERC-2981, 0–10%): 20% to
-///           the platform, the rest split as the creator set at creation (immutable): creator / NFT holders /
-///           buyback & burn of the linked token.
-///           * Holders: credited per NFT (on-chain accumulator); the owner of an NFT claims what it earned.
-///           * Burn: payments in the token are burned at once (sent to 0x…dEaD); the ETH part waits in the
-///             contract and anyone calls `buyback` to buy the token through its Uniswap v4 pool (route from the
-///             PlaceRewardTokenRegistry or the token's Place launch pool), capped by the registry's price impact
-///             per hop and by the guard's reference price, then burns it.
-///         - Royalties in ETH or WETH join the ETH economy; in the linked token they join the token economy; in
-///           any other ERC-20 the platform takes 20% and the creator the rest (no holders accumulator or route).
-/// @dev    `reserved[asset]` is what the contract owes (creator, platform, holders, pending buyback); everything
-///         above it is an unprocessed royalty that `distributeRoyalties` splits.
-contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, ReentrancyGuard, PlaceRouteSwapper {
+///         - **Pair token** (`token`): required for a paid mint. A Place token (its launch pool) or any token with
+///           a route ETH -> token in the PlaceRewardTokenRegistry (1–3 Uniswap v4 hops). The factory refuses a
+///           token without a route. A free collection may have no pair (royalties only, holders paid in ETH).
+///         - **Mint**: the price is always in ETH; optionally also payable in the pair token at the ETH equivalent
+///           at the moment of the mint (PlacePriceGuard: the buyer pays the larger of the reference and the spot
+///           amounts; refused while the price is not ready or deviates).
+///         - **Economy** of every payment and of every royalty (ERC-2981, 0–10%): 20% to the platform, the rest
+///           split as the creator set at creation (immutable): creator / NFT holders / buyback & burn.
+///           * Holders pool: the holders share, in the **reward token** the creator picked (ETH, the pair token, or
+///             any token with a registry route from ETH), is paid out over `POOL_DAYS` days in equal daily
+///             portions. A portion accrues at 00:00 UTC to every NFT that exists at that moment, equally per NFT.
+///             A new income re-spreads what is left plus the income over the next `POOL_DAYS` days (the
+///             StakingRewards rate / period-finish scheme, by whole UTC days); the pool ends `POOL_DAYS` days
+///             after the last income. Income that arrives while no NFT exists goes to the creator.
+///           * A holders share in another asset is swapped into the reward token in the same transaction and
+///             joins the pool when the swap happens.
+///           * Burn: payments in the pair token are burned at once; the ETH part buys the pair token in the same
+///             mint transaction and burns it.
+///           * Swaps go through PlaceNftSwapper (guard reference output minus the guard's max deviation and the
+///             registry's per-hop impact). If a swap cannot run safely the mint still succeeds: the amount waits
+///             and every later mint (or anyone, with `processPending`) tries again.
+///         - **Royalties** in ETH arrive as plain transfers and wait for the next mint or `processPending`; WETH
+///           and ERC-20 royalties are split by `processPending(asset)` (any ERC-20 other than the pair token: 20%
+///           platform, the rest to the creator).
+///         - **Transfers**: what an NFT accrued and its owner did not claim stays with the previous owner (credited to
+///           its address, claimed later); later accruals go to the new owner.
+/// @dev    No keeper: the pool accrues lazily from any transaction by the number of whole UTC days passed. Every
+///         change of the NFT count (a mint) accrues first, so the count is constant between two accruals.
+///         `reserved[asset]` is everything the contract owes; anything above it is an unprocessed royalty.
+contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Strings for uint256;
 
@@ -70,24 +80,27 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
         uint32 maxPerWallet; // 0 = no limit
         uint64 mintStart; // 0 = at once
         uint64 mintEnd; // 0 = no end
-        uint128 mintPrice; // wei per NFT; 0 = free mint (no economy, no token payments)
-        address token; // the linked token (0 = none: no burn share, no token payments)
-        bool tokenPayments; // also accept the linked token at the ETH-equivalent price
+        uint128 mintPrice; // wei per NFT; 0 = free mint
+        address token; // the pair token (required for a paid mint)
+        bool tokenPayments; // also accept the pair token at the ETH-equivalent price
+        address rewardToken; // holders are paid in it: ETH (0), the pair token, or a token with a route from ETH
         uint16 royaltyBps; // 0–1 000
         Economy economy;
-        PoolKey launchPool; // the token's Place launch pool (tickSpacing 0 = none; verified by the factory)
+        PoolKey launchPool; // the pair token's Place launch pool (tickSpacing 0 = none; verified by the factory)
     }
 
     uint16 public constant PLATFORM_BPS = 2_000;
     uint16 public constant MAX_ROYALTY_BPS = 1_000;
+    /// @notice Days over which every holders income is paid out.
+    uint256 public constant POOL_DAYS = 30;
     uint256 internal constant BPS = 10_000;
     uint256 internal constant ACC = 1e36;
     address public constant BURN_SINK = 0x000000000000000000000000000000000000dEaD;
     address internal constant ETH = address(0);
 
     address public factory;
-    IPoolManager public poolManager;
     address public token;
+    address public rewardToken;
     bool public official;
     Kind public kind;
     bool public tokenPayments;
@@ -112,27 +125,45 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
     mapping(address asset => uint256 amount) public reserved;
     mapping(address asset => uint256 amount) public creatorOwed;
     mapping(address asset => uint256 amount) public platformOwed;
-    /// @notice ETH waiting to buy back and burn the linked token.
+    /// @notice ETH waiting to buy back and burn the pair token.
     uint256 public buybackPending;
-    /// @notice Holders accumulator: rewards per NFT since the first mint, scaled by 1e36 (ETH and the token).
-    mapping(address asset => uint256 perNft) public accPerNft;
-    mapping(uint256 tokenId => mapping(address asset => uint256 perNft)) internal _paidPerNft;
-    /// @notice Lifetime totals for the collection page.
-    mapping(address asset => uint256 amount) public totalBurned;
+    /// @notice Holders shares in `asset` (not the reward token) waiting to be swapped into the pool.
+    mapping(address asset => uint256 amount) public pendingHolders;
 
-    event CollectionInitialized(address indexed creator, address indexed token, bool official, Kind kind);
+    /// @notice Holders pool: reward token per UTC day, scaled by 1e36.
+    uint256 public rewardRate;
+    /// @notice Last UTC day (days since 1970-01-01) that accrues a portion; the pool ends after it.
+    uint64 public periodFinish;
+    /// @notice UTC day up to which the pool has accrued.
+    uint64 public lastAccrualDay;
+    /// @notice Reward token accrued per NFT, ever (scaled by 1e36).
+    uint256 public accPerNft;
+    mapping(uint256 tokenId => uint256 acc) internal _paid;
+    /// @notice Settled holder rewards of an address, in the reward token (previous owners after a transfer).
+    mapping(address account => uint256 amount) public credit;
+    /// @notice Pair tokens burned, ever.
+    uint256 public totalBurned;
+
+    event CollectionInitialized(
+        address indexed creator, address indexed token, address rewardToken, bool official, Kind kind
+    );
     event Minted(address indexed to, uint256 firstTokenId, uint256 quantity, address indexed asset, uint256 paid);
     event RevenueSplit(
         address indexed asset, uint256 platform, uint256 creator, uint256 holders, uint256 burn, bool royalty
     );
-    event HoldersClaimed(address indexed owner, uint256 ethAmount, uint256 tokenAmount);
-    event CreatorPaid(address indexed to, address indexed asset, uint256 amount);
-    event PlatformPaid(address indexed to, address indexed asset, uint256 amount);
-    event TokensBurned(uint256 amount, bool fromBuyback);
-    event BuybackExecuted(address indexed caller, uint256 ethIn, uint256 tokensBurned);
-    event MintPriceSet(uint128 price);
-    event MintWindowSet(uint64 start, uint64 end);
-    event TokenPaymentsSet(bool enabled);
+    event HoldersFunded(uint256 amount, uint256 rewardRate, uint64 periodFinish);
+    event HoldersConverted(address indexed asset, uint256 amountIn, uint256 rewardOut);
+    event ConversionDeferred(address indexed asset, uint256 amount);
+    event HoldersClaimed(address indexed account, uint256 amount);
+    event Paid(
+        address indexed creator,
+        address indexed platform,
+        address indexed asset,
+        uint256 creatorAmount,
+        uint256 platformAmount
+    );
+    event TokensBurned(uint256 amount, uint256 ethIn);
+    event MintSet(uint128 price, uint64 start, uint64 end, bool tokenPayments);
     event RoyaltySet(uint16 bps);
     event BaseURISet(string baseURI, string uriSuffix);
     event MetadataFrozen();
@@ -148,10 +179,7 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
     error TokenPaymentsDisabled();
     error TokenAmountAboveMax(uint256 due, uint256 maxIn);
     error NotTokenOwner(uint256 tokenId);
-    error NoRoute();
     error NothingToDo();
-    error BuybackSlippage(uint256 out, uint256 minOut);
-    error UnsupportedAsset();
     error Frozen();
     error TransferFailed();
 
@@ -159,23 +187,19 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
         _disableInitializers();
     }
 
-    /// @dev Royalties and WETH unwraps; split later by `distributeRoyalties`.
+    /// @dev Royalties (split on the next mint or `processPending`), WETH unwraps and swap outputs.
     receive() external payable {}
 
-    /// @notice Called once by the factory right after cloning.
-    function initialize(InitParams calldata p, address creator, bool isOfficial, IPoolManager manager)
-        external
-        initializer
-    {
+    /// @notice Called once by the factory right after cloning. The factory checks the routes.
+    function initialize(InitParams calldata p, address creator, bool isOfficial) external initializer {
         Economy calldata e = p.economy;
         if (
             uint256(e.creatorBps) + e.holdersBps + e.burnBps != BPS || p.royaltyBps > MAX_ROYALTY_BPS
                 || (p.kind == Kind.Unique && p.maxSupply == 0) || (p.mintEnd != 0 && p.mintEnd <= p.mintStart)
-                || (p.token == ETH && (e.burnBps != 0 || p.tokenPayments)) || (p.tokenPayments && p.mintPrice == 0)
-                || bytes(p.name).length == 0 || creator == address(0)
+                || (p.token == ETH && (p.mintPrice != 0 || e.burnBps != 0 || p.rewardToken != ETH))
+                || (p.tokenPayments && p.mintPrice == 0) || bytes(p.name).length == 0 || creator == address(0)
         ) revert InvalidConfig();
         factory = msg.sender;
-        poolManager = manager;
         _transferOwnership(creator);
         _name = p.name;
         _symbol = p.symbol;
@@ -190,11 +214,12 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
         mintPrice = p.mintPrice;
         token = p.token;
         tokenPayments = p.tokenPayments;
+        rewardToken = p.rewardToken;
         royaltyBps = p.royaltyBps;
         _economy = e;
         _launchPool = p.launchPool;
         official = isOfficial;
-        emit CollectionInitialized(creator, p.token, isOfficial, p.kind);
+        emit CollectionInitialized(creator, p.token, p.rewardToken, isOfficial, p.kind);
     }
 
     // ───────────────────────────── Mint ─────────────────────────────
@@ -203,139 +228,121 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
     function mint(address to, uint256 quantity) external payable nonReentrant returns (uint256 firstTokenId) {
         uint256 cost = uint256(mintPrice) * quantity;
         if (msg.value != cost) revert WrongPayment(msg.value, cost);
-        firstTokenId = _mintMany(to, quantity);
-        emit Minted(to, firstTokenId, quantity, ETH, cost);
-        if (cost != 0) _split(ETH, cost, false);
+        firstTokenId = _settleMint(to, quantity, ETH, cost);
     }
 
-    /// @notice Mints `quantity` NFTs to `to`, paying in the linked token the market equivalent of the ETH price:
-    ///         the larger of the reference and the spot amounts of PlacePriceGuard (reverts while the pool's price
-    ///         is not ready or deviates). `maxTokenIn` caps what the buyer pays.
+    /// @notice Mints `quantity` NFTs to `to`, paying in the pair token the market equivalent of the ETH price:
+    ///         the larger of the reference and the spot amounts of PlacePriceGuard (reverts while the price is not
+    ///         ready or deviates). `maxTokenIn` caps what the buyer pays.
     function mintWithToken(address to, uint256 quantity, uint256 maxTokenIn)
         external
         nonReentrant
         returns (uint256 firstTokenId, uint256 paid)
     {
         if (!tokenPayments) revert TokenPaymentsDisabled();
+        address t = token;
         uint256 due = quoteTokenPrice(quantity);
         if (due > maxTokenIn) revert TokenAmountAboveMax(due, maxTokenIn);
-        _guard().observeRoute(ethRoute()); // after the quote: an observation never counts in its own block
-        uint256 before = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransferFrom(msg.sender, address(this), due);
-        paid = IERC20(token).balanceOf(address(this)) - before;
-        firstTokenId = _mintMany(to, quantity);
-        emit Minted(to, firstTokenId, quantity, token, paid);
-        _split(token, paid, false);
+        // After the quote: an observation never counts in its own block.
+        _swapper().observeMint(address(this));
+        uint256 before = IERC20(t).balanceOf(address(this));
+        IERC20(t).safeTransferFrom(msg.sender, address(this), due);
+        paid = IERC20(t).balanceOf(address(this)) - before;
+        firstTokenId = _settleMint(to, quantity, t, paid);
     }
 
     // ───────────────────────────── Holders ─────────────────────────────
 
-    /// @notice Pays the caller what its NFTs `tokenIds` earned, in ETH and in the linked token.
-    function claim(uint256[] calldata tokenIds) external nonReentrant returns (uint256 ethAmount, uint256 tokenAmount) {
-        address t = token;
+    /// @notice Settles the caller's NFTs `tokenIds` and pays everything credited to the caller in the reward token
+    ///         (also what NFTs it sold had accrued; pass no ids for that alone).
+    function claim(uint256[] calldata tokenIds) external nonReentrant returns (uint256 amount) {
+        _accrue();
         for (uint256 i = 0; i < tokenIds.length; i++) {
             uint256 id = tokenIds[i];
             if (ownerOf(id) != msg.sender) revert NotTokenOwner(id);
-            ethAmount += _settle(id, ETH);
-            if (t != ETH) tokenAmount += _settle(id, t);
+            _settle(id, msg.sender);
         }
-        if (ethAmount != 0) {
-            reserved[ETH] -= ethAmount;
-            _sendETH(msg.sender, ethAmount);
+        amount = credit[msg.sender];
+        if (amount != 0) {
+            credit[msg.sender] = 0;
+            _pay(rewardToken, msg.sender, amount);
+            emit HoldersClaimed(msg.sender, amount);
         }
-        if (tokenAmount != 0) {
-            reserved[t] -= tokenAmount;
-            IERC20(t).safeTransfer(msg.sender, tokenAmount);
-        }
-        emit HoldersClaimed(msg.sender, ethAmount, tokenAmount);
     }
 
     // ───────────────────────────── Anyone ─────────────────────────────
 
-    /// @notice Splits royalties that reached the contract: ETH (WETH is unwrapped first), the linked token, or
-    ///         any other ERC-20 (20% platform, the rest to the creator).
-    function distributeRoyalties(address asset) external nonReentrant returns (uint256 amount) {
+    /// @notice Splits royalties that reached the contract in `asset` and retries every waiting swap (holders
+    ///         shares into the reward token, ETH into burned pair tokens; a failed swap keeps waiting). ETH and
+    ///         WETH (unwrapped) and the pair token join the economy; any other ERC-20 goes 20% to the platform and
+    ///         the rest to the creator (`payOut`). Anyone can call it, also with nothing to split.
+    function processPending(address asset) external nonReentrant returns (uint256 amount) {
+        _accrue();
         address weth = IPlaceNftFactory(factory).weth();
         if (asset == weth && weth != address(0)) {
             uint256 wrapped = IERC20(weth).balanceOf(address(this));
             if (wrapped != 0) IWETH9(weth).withdraw(wrapped);
             asset = ETH;
         }
-        uint256 balance = asset == ETH ? address(this).balance : IERC20(asset).balanceOf(address(this));
-        amount = balance - reserved[asset];
-        if (amount == 0) revert NothingToDo();
-        if (asset == ETH || asset == token) {
-            _split(asset, amount, true);
+        if (asset == ETH) {
+            amount = _splitEthRoyalties(0, totalMinted);
         } else {
-            uint256 platform = amount * PLATFORM_BPS / BPS;
-            emit RevenueSplit(asset, platform, amount - platform, 0, 0, true);
-            IERC20(asset).safeTransfer(_platform(), platform);
-            IERC20(asset).safeTransfer(owner(), amount - platform);
+            amount = IERC20(asset).balanceOf(address(this)) - reserved[asset];
+            if (asset == token) {
+                if (amount != 0) _split(asset, amount, true, totalMinted);
+            } else {
+                uint256 platform = amount * PLATFORM_BPS / BPS;
+                platformOwed[asset] += platform;
+                creatorOwed[asset] += amount - platform;
+                reserved[asset] += amount;
+                emit RevenueSplit(asset, platform, amount - platform, 0, 0, true);
+            }
         }
+        _processPending();
     }
 
-    /// @notice Buys the linked token with up to `maxEthIn` of the pending buyback ETH and burns it. Anyone can
-    ///         call it. Each hop may move its pool by at most the registry's `maxPriceImpactBps`, and the output
-    ///         must reach the guard's reference output minus (max deviation + impact), so a sandwich reverts it.
+    /// @notice Buys and burns the pair token with up to `maxEthIn` of the waiting buyback ETH (a slice, when the
+    ///         whole amount would move the pool too much). Reverts if the guarded swap cannot run.
     function buyback(uint256 maxEthIn) external nonReentrant returns (uint256 burned) {
-        uint256 amountIn = maxEthIn < buybackPending ? maxEthIn : buybackPending;
+        uint256 amountIn = Math.min(maxEthIn, buybackPending);
         if (amountIn == 0) revert NothingToDo();
-        PoolKey[] memory route = ethRoute();
-        IPlacePriceGuard guard = _guard();
-        (uint256 referenceOut,) = guard.quote(route, ETH, amountIn);
-        guard.observeRoute(route);
-        uint16 impact = IPlaceRewardTokenRegistry(_registry()).maxPriceImpactBps();
-        uint256 tolerance = uint256(guard.config().maxDeviationBps) + uint256(impact) * route.length;
-        uint256 minOut = tolerance >= BPS ? 0 : referenceOut * (BPS - tolerance) / BPS;
-        buybackPending -= amountIn;
-        reserved[ETH] -= amountIn;
-        (, burned) = _swapRoute(ETH, route, amountIn, impact);
-        if (burned < minOut) revert BuybackSlippage(burned, minOut);
-        _burnTokens(burned, true);
-        emit BuybackExecuted(msg.sender, amountIn, burned);
+        burned = _swap(ETH, amountIn, true);
     }
 
-    /// @notice Pays the creator (the collection owner) what it is owed in `asset`.
-    function payCreator(address asset) external nonReentrant returns (uint256 amount) {
-        amount = creatorOwed[asset];
-        if (amount == 0) revert NothingToDo();
+    /// @notice Pays what the creator (the collection owner) and the platform (the factory's recipient) are owed in
+    ///         `asset`. Anyone can call it.
+    function payOut(address asset) external nonReentrant returns (uint256 creatorAmount, uint256 platformAmount) {
+        creatorAmount = creatorOwed[asset];
+        platformAmount = platformOwed[asset];
+        if (creatorAmount + platformAmount == 0) revert NothingToDo();
         creatorOwed[asset] = 0;
-        reserved[asset] -= amount;
-        address to = owner();
-        _send(asset, to, amount);
-        emit CreatorPaid(to, asset, amount);
-    }
-
-    /// @notice Pays the platform share in `asset` to the factory's platform recipient.
-    function payPlatform(address asset) external nonReentrant returns (uint256 amount) {
-        amount = platformOwed[asset];
-        if (amount == 0) revert NothingToDo();
         platformOwed[asset] = 0;
-        reserved[asset] -= amount;
-        address to = _platform();
-        _send(asset, to, amount);
-        emit PlatformPaid(to, asset, amount);
+        address creator = owner();
+        address platform = _platform();
+        emit Paid(creator, platform, asset, creatorAmount, platformAmount);
+        if (creatorAmount != 0) {
+            if (asset == ETH) {
+                // A creator that refuses ETH keeps its share owed instead of blocking the platform payout.
+                (bool ok,) = creator.call{value: creatorAmount}("");
+                if (ok) reserved[ETH] -= creatorAmount;
+                else creatorOwed[ETH] = creatorAmount;
+            } else {
+                _pay(asset, creator, creatorAmount);
+            }
+        }
+        if (platformAmount != 0) _pay(asset, platform, platformAmount);
     }
 
     // ───────────────────────────── Creator ─────────────────────────────
 
-    function setMintPrice(uint128 price) external onlyOwner {
-        if (price == 0 && tokenPayments) revert InvalidConfig();
-        mintPrice = price;
-        emit MintPriceSet(price);
-    }
-
-    function setMintWindow(uint64 start, uint64 end) external onlyOwner {
-        if (end != 0 && end <= start) revert InvalidConfig();
-        mintStart = start;
-        mintEnd = end;
-        emit MintWindowSet(start, end);
-    }
-
-    function setTokenPayments(bool enabled) external onlyOwner {
-        if (enabled && (token == ETH || mintPrice == 0)) revert InvalidConfig();
-        tokenPayments = enabled;
-        emit TokenPaymentsSet(enabled);
+    /// @notice Mint settings: price per NFT in ETH (0 = free; needs a pair token otherwise), window (`end` 0 = no
+    ///         end) and whether the pair token is also accepted.
+    function setMint(uint128 price, uint64 start, uint64 end, bool payInToken) external onlyOwner {
+        if ((end != 0 && end <= start) || (price == 0 && payInToken) || (price != 0 && token == ETH)) {
+            revert InvalidConfig();
+        }
+        (mintPrice, mintStart, mintEnd, tokenPayments) = (price, start, end, payInToken);
+        emit MintSet(price, start, end, payInToken);
     }
 
     function setRoyaltyBps(uint16 bps) external onlyOwner {
@@ -360,6 +367,11 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
     function freezeMetadata() external onlyOwner {
         metadataFrozen = true;
         emit MetadataFrozen();
+    }
+
+    /// @notice Disabled: a collection always has an owner that receives the creator share.
+    function renounceOwnership() public view override onlyOwner {
+        revert InvalidConfig();
     }
 
     // ───────────────────────────── Views ─────────────────────────────
@@ -404,59 +416,36 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
             || super.supportsInterface(interfaceId);
     }
 
-    /// @notice What NFT `tokenId` has earned and not claimed: ETH and the linked token.
-    function claimable(uint256 tokenId) external view returns (uint256 ethAmount, uint256 tokenAmount) {
+    /// @notice Reward token NFT `tokenId` has accrued and not settled, as of now.
+    function claimable(uint256 tokenId) external view returns (uint256) {
         _requireOwned(tokenId);
-        ethAmount = (accPerNft[ETH] - _paidPerNft[tokenId][ETH]) / ACC;
-        if (token != ETH) tokenAmount = (accPerNft[token] - _paidPerNft[tokenId][token]) / ACC;
+        (uint256 acc,) = _accrued();
+        return (acc - _paid[tokenId]) / ACC;
     }
 
-    /// @notice Token amount `mintWithToken` would charge for `quantity` NFTs now.
+    /// @notice Pair-token amount `mintWithToken` would charge for `quantity` NFTs now.
     function quoteTokenPrice(uint256 quantity) public view returns (uint256 due) {
-        (uint256 referenceOut, uint256 spotOut) = _guard().quote(ethRoute(), ETH, uint256(mintPrice) * quantity);
-        due = referenceOut > spotOut ? referenceOut : spotOut;
-        if (due == 0) revert NoRoute();
-    }
-
-    /// @notice The ETH -> token route: the token's Place launch pool (behind a registry route ETH -> its quote if
-    ///         the quote is not ETH), or else the registry route ETH -> token.
-    function ethRoute() public view returns (PoolKey[] memory route) {
-        if (token == ETH) revert NoRoute();
-        IPlaceRewardTokenRegistry registry = IPlaceRewardTokenRegistry(_registry());
-        PoolKey memory pool = _launchPool;
-        if (pool.tickSpacing == 0) {
-            route = address(registry) == address(0) ? new PoolKey[](0) : registry.routeOf(ETH, token);
-        } else {
-            address c0 = Currency.unwrap(pool.currency0);
-            address quoteAsset = c0 == token ? Currency.unwrap(pool.currency1) : c0;
-            PoolKey[] memory head;
-            if (quoteAsset != ETH) {
-                if (address(registry) == address(0)) revert NoRoute();
-                head = registry.routeOf(ETH, quoteAsset);
-                if (head.length == 0) revert NoRoute();
-            }
-            route = new PoolKey[](head.length + 1);
-            for (uint256 i = 0; i < head.length; i++) {
-                route[i] = head[i];
-            }
-            route[head.length] = pool;
-        }
-        if (route.length == 0) revert NoRoute();
+        (uint256 referenceOut, uint256 spotOut) = _swapper().quoteMint(address(this), uint256(mintPrice) * quantity);
+        due = Math.max(referenceOut, spotOut);
+        if (due == 0) revert InvalidConfig();
     }
 
     // ───────────────────────────── Internals ─────────────────────────────
 
-    function _poolManager() internal view override returns (IPoolManager) {
-        return poolManager;
+    /// @dev Accrues the pool, splits royalties and the payment (holders share to the creator if no NFT exists yet),
+    ///      runs the waiting swaps, then mints.
+    function _settleMint(address to, uint256 quantity, address asset, uint256 paid) internal returns (uint256 first) {
+        _accrue();
+        uint256 holdersBefore = totalMinted;
+        _splitEthRoyalties(asset == ETH ? paid : 0, holdersBefore);
+        if (paid != 0) _split(asset, paid, false, holdersBefore);
+        _processPending();
+        first = _mintMany(to, quantity);
+        emit Minted(to, first, quantity, asset, paid);
     }
 
-    function _guard() internal view returns (IPlacePriceGuard guard) {
-        guard = IPlacePriceGuard(IPlaceNftFactory(factory).priceGuard());
-        if (address(guard) == address(0)) revert NoRoute();
-    }
-
-    function _registry() internal view returns (address) {
-        return IPlaceNftFactory(factory).rewardRegistry();
+    function _swapper() internal view returns (IPlaceNftSwapper) {
+        return IPlaceNftSwapper(IPlaceNftFactory(factory).swapper());
     }
 
     function _platform() internal view returns (address) {
@@ -468,70 +457,178 @@ contract PlaceNftCollection is ERC721, IERC2981, Ownable2Step, Initializable, Re
         if (block.timestamp < mintStart || (mintEnd != 0 && block.timestamp >= mintEnd)) revert MintClosed();
         if (quantity == 0) revert InvalidConfig();
         uint256 minted = totalMinted;
-        if (maxSupply != 0 && minted + quantity > maxSupply) revert SoldOut();
+        if ((maxSupply != 0 && minted + quantity > maxSupply) || minted + quantity > type(uint32).max) {
+            revert SoldOut();
+        }
         uint256 walletMinted = uint256(mintedBy[to]) + quantity;
         if (maxPerWallet != 0 && walletMinted > maxPerWallet) revert WalletLimit();
-        // forge-lint: disable-next-line(unsafe-typecast) bounded by maxSupply or by the uint32 check below
+        // forge-lint: disable-next-line(unsafe-typecast) bounded by maxSupply or by the uint32 check above
         mintedBy[to] = uint32(walletMinted);
-        if (minted + quantity > type(uint32).max) revert SoldOut();
         // forge-lint: disable-next-line(unsafe-typecast) checked above
         totalMinted = uint32(minted + quantity);
         first = minted + 1;
-        uint256 accEth = accPerNft[ETH];
-        address t = token;
-        uint256 accToken = t == ETH ? 0 : accPerNft[t];
         for (uint256 id = first; id < first + quantity; id++) {
-            // New NFTs start from the current accumulator: they earn only what comes after them.
-            if (accEth != 0) _paidPerNft[id][ETH] = accEth;
-            if (accToken != 0) _paidPerNft[id][t] = accToken;
             _safeMint(to, id);
         }
     }
 
-    /// @dev Splits `amount` of `asset` (ETH or the linked token) that the contract already holds.
-    function _split(address asset, uint256 amount, bool royalty) internal {
+    /// @dev New NFTs start from the current accumulator; a transfer settles the NFT for its previous owner.
+    function _update(address to, uint256 tokenId, address auth) internal override returns (address from) {
+        _accrue();
+        from = _ownerOf(tokenId);
+        if (from == address(0)) {
+            _paid[tokenId] = accPerNft;
+        } else if (to != from) {
+            _settle(tokenId, from);
+        }
+        return super._update(to, tokenId, auth);
+    }
+
+    /// @dev Credits NFT `id`'s accrued rewards to `account` (the pool must be accrued).
+    function _settle(uint256 id, address account) internal {
+        uint256 acc = accPerNft;
+        credit[account] += (acc - _paid[id]) / ACC;
+        _paid[id] = acc;
+    }
+
+    /// @dev The accumulator after the daily portions of every whole UTC day since the last accrual, and today.
+    function _accrued() internal view returns (uint256 acc, uint64 today) {
+        // forge-lint: disable-next-line(unsafe-typecast) days fit in uint64
+        today = uint64(block.timestamp / 1 days);
+        acc = accPerNft;
+        uint256 end = Math.min(today, periodFinish);
+        uint256 last = lastAccrualDay;
+        uint256 supply = totalMinted;
+        if (end > last && supply != 0) acc += rewardRate * (end - last) / supply;
+    }
+
+    function _accrue() internal {
+        (uint256 acc, uint64 today) = _accrued();
+        if (today == lastAccrualDay) return;
+        accPerNft = acc;
+        lastAccrualDay = today;
+    }
+
+    /// @dev Adds `amount` of the reward token (already in `reserved`) to the holders pool: what is left of the
+    ///      current pool plus `amount` is paid over the next `POOL_DAYS` days, from tomorrow 00:00 UTC.
+    function _fundPool(uint256 amount) internal {
+        _accrue();
+        uint64 today = lastAccrualDay;
+        uint256 left = periodFinish > today ? rewardRate * (periodFinish - today) : 0;
+        uint256 rate = (amount * ACC + left) / POOL_DAYS;
+        uint64 finish = today + uint64(POOL_DAYS);
+        (rewardRate, periodFinish) = (rate, finish);
+        emit HoldersFunded(amount, rate, finish);
+    }
+
+    /// @dev Splits ETH above what the contract owes (royalties), leaving `excluded` (this mint's payment) aside.
+    function _splitEthRoyalties(uint256 excluded, uint256 holders) internal returns (uint256 amount) {
+        uint256 owed = reserved[ETH] + excluded;
+        uint256 balance = address(this).balance;
+        if (balance <= owed) return 0;
+        amount = balance - owed;
+        _split(ETH, amount, true, holders);
+    }
+
+    /// @dev Splits `amount` of `asset` (ETH or the pair token) the contract holds. `holders`: the NFT count; with
+    ///      none the holders share goes to the creator.
+    function _split(address asset, uint256 amount, bool royalty, uint256 holders) internal {
         Economy memory e = _economy;
         uint256 platform = amount * PLATFORM_BPS / BPS;
         uint256 rest = amount - platform;
         uint256 toBurn = rest * e.burnBps / BPS;
-        uint256 toHolders = rest * e.holdersBps / BPS;
-        uint256 supply = totalMinted;
-        if (supply == 0) toHolders = 0; // no NFT yet (royalty before any mint): the creator takes it
+        uint256 toHolders = holders == 0 ? 0 : rest * e.holdersBps / BPS;
         uint256 toCreator = rest - toBurn - toHolders;
         platformOwed[asset] += platform;
         creatorOwed[asset] += toCreator;
         reserved[asset] += platform + toCreator + toHolders;
-        if (toHolders != 0) accPerNft[asset] += toHolders * ACC / supply;
+        if (toHolders != 0) {
+            if (asset == rewardToken) _fundPool(toHolders);
+            else pendingHolders[asset] += toHolders;
+        }
         if (toBurn != 0) {
             if (asset == ETH) {
                 buybackPending += toBurn;
                 reserved[ETH] += toBurn;
             } else {
-                _burnTokens(toBurn, false);
+                _burnTokens(toBurn, 0);
             }
         }
         emit RevenueSplit(asset, platform, toCreator, toHolders, toBurn, royalty);
     }
 
-    function _settle(uint256 tokenId, address asset) internal returns (uint256 amount) {
-        uint256 acc = accPerNft[asset];
-        amount = (acc - _paidPerNft[tokenId][asset]) / ACC;
-        if (amount != 0) _paidPerNft[tokenId][asset] = acc;
+    /// @dev Tries every waiting swap; a swap that cannot run safely leaves its amount waiting.
+    function _processPending() internal {
+        if (IPlaceNftFactory(factory).swapper().code.length == 0) return;
+        _tryConvert(ETH);
+        if (token != ETH) _tryConvert(token);
+        uint256 burnIn = buybackPending;
+        if (burnIn != 0) {
+            try this.swapFromSelf(ETH, burnIn, true) {}
+            catch {
+                emit ConversionDeferred(BURN_SINK, burnIn);
+            }
+        }
     }
 
-    function _burnTokens(uint256 amount, bool fromBuyback) internal {
-        totalBurned[token] += amount;
+    function _tryConvert(address asset) internal {
+        uint256 amountIn = pendingHolders[asset];
+        if (amountIn == 0 || asset == rewardToken) return;
+        try this.swapFromSelf(asset, amountIn, false) returns (uint256 out) {
+            pendingHolders[asset] = 0;
+            emit HoldersConverted(asset, amountIn, out);
+            _fundPool(out);
+        } catch {
+            emit ConversionDeferred(asset, amountIn);
+        }
+    }
+
+    /// @dev Only callable by the contract itself, so that a failing swap reverts alone inside `try`.
+    function swapFromSelf(address input, uint256 amountIn, bool burn) external returns (uint256) {
+        if (msg.sender != address(this)) revert NothingToDo();
+        return _swap(input, amountIn, burn);
+    }
+
+    /// @dev Guarded swap of `amountIn` of `input`: ETH into burned pair tokens (`burn`), or a waiting holders share
+    ///      into the reward token.
+    function _swap(address input, uint256 amountIn, bool burn) internal returns (uint256 out) {
+        IPlaceNftSwapper swapper = _swapper();
+        address output = burn ? token : rewardToken;
+        uint256 before = _balance(output);
+        if (input == ETH) {
+            swapper.swapFor{value: amountIn}(ETH, amountIn, burn);
+        } else {
+            IERC20(input).forceApprove(address(swapper), amountIn);
+            swapper.swapFor(input, amountIn, burn);
+        }
+        out = _balance(output) - before;
+        reserved[input] -= amountIn;
+        if (burn) {
+            buybackPending -= amountIn;
+            _burnTokens(out, amountIn);
+        } else {
+            reserved[output] += out;
+        }
+    }
+
+    function _balance(address asset) internal view returns (uint256) {
+        return asset == ETH ? address(this).balance : IERC20(asset).balanceOf(address(this));
+    }
+
+    function _burnTokens(uint256 amount, uint256 ethIn) internal {
+        totalBurned += amount;
         IERC20(token).safeTransfer(BURN_SINK, amount);
-        emit TokensBurned(amount, fromBuyback);
+        emit TokensBurned(amount, ethIn);
     }
 
-    function _send(address asset, address to, uint256 amount) internal {
-        if (asset == ETH) _sendETH(to, amount);
-        else IERC20(asset).safeTransfer(to, amount);
-    }
-
-    function _sendETH(address to, uint256 amount) internal {
-        (bool ok,) = to.call{value: amount}("");
-        if (!ok) revert TransferFailed();
+    /// @dev Pays an amount that `reserved` covers.
+    function _pay(address asset, address to, uint256 amount) internal {
+        reserved[asset] -= amount;
+        if (asset == ETH) {
+            (bool ok,) = to.call{value: amount}("");
+            if (!ok) revert TransferFailed();
+        } else {
+            IERC20(asset).safeTransfer(to, amount);
+        }
     }
 }

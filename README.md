@@ -36,19 +36,28 @@ Leaf format: `keccak256(bytes.concat(keccak256(abi.encode(streamId, account, cum
 
 ## NFT collections
 
-`PlaceNftFactory` creates `PlaceNftCollection` clones (ERC-721, ERC-2981) for any token, or none. A collection made by
-the token's creator is marked **official**.
+An NFT launch works like a token launch. `PlaceNftFactory` creates `PlaceNftCollection` clones (ERC-721, ERC-2981)
+paired with a token: a Place token (through its launch pool) or any token with a route from ETH in the
+`PlaceRewardTokenRegistry` (1–3 Uniswap v4 hops). A token without a route cannot be paired; a free collection may have
+no pair. A collection made by the pair token's creator is marked **official**.
 
 - **Unique** (one metadata file per NFT in an IPFS folder) or **Edition** (one URI for all); supply, per-wallet limit,
   mint window, collection metadata (`contractURI`).
-- Mint in ETH at a fixed price, and optionally in the linked token at the market equivalent of that price.
+- The mint price is in ETH; buyers can also pay in the pair token at the ETH equivalent at the moment of the mint.
 - Every mint payment and every royalty (0–10%) is split: **20% platform**, the rest between the creator, NFT holders
-  (an on-chain accumulator per NFT, claimed by its owner) and buyback & burn of the linked token, as the creator set at
-  creation. Token payments are burned at once; the ETH part buys the token through its Uniswap v4 pool when anyone calls
-  `buyback`.
-- `PlacePriceGuard` keeps a reference price per pool that moves at most 1% per observation and is never used in the
-  block it was written. Token-priced mints charge the larger of the reference and spot amounts, buybacks must reach
-  the reference output minus a tolerance, and both refuse to run while spot and reference differ by more than 3%.
+  and buyback & burn of the pair token, as the creator set at creation.
+- **Holders pool**: the holders share, in the **reward token** the creator picked (ETH, the pair token, or any token
+  with a registry route from ETH), is paid out over 30 days. Every day at 00:00 UTC a portion accrues equally to each
+  NFT that exists at that moment; a new income re-spreads what is left plus the income over the next 30 days. No
+  keeper: any transaction catches up on the days passed. Income that arrives before the first NFT goes to the creator.
+  What an NFT accrued stays with the seller when it changes hands; owners claim at any time.
+- In the mint transaction the holders share is swapped into the reward token and the burn share buys the pair token
+  and burns it (pair-token payments burn at once). If a swap cannot run safely the mint still succeeds and the amount
+  waits for the next mint, or for anyone to call `processPending`. ETH royalties wait the same way.
+- Swaps go through the factory's `PlaceNftSwapper` and `PlacePriceGuard`: a reference price per pool that moves at most
+  1% per observation and is never used in the block it was written. Token-priced mints charge the larger of the
+  reference and spot amounts, swaps must reach the reference output minus a tolerance, and both refuse to run while spot
+  and reference differ by more than 3%.
 
 ## Status
 
@@ -56,7 +65,7 @@ Place Launch **0.3.0** (Standard and Economy launches, daily rewards, community 
 
 ## Build
 
-Install [Foundry](https://book.getfoundry.sh/getting-started/installation) 1.8.4 or later (it runs Base's B20 precompiles with `--hardfork base:Cobalt`), then:
+Install [Foundry](https://book.getfoundry.sh/getting-started/installation) 1.8.5 or later (it runs Base's B20 precompiles with `--hardfork base:Denim`), then:
 
 ```bash
 git clone --recursive https://github.com/Maksyaka12/place-contracts.git
@@ -78,7 +87,7 @@ through public RPCs (override with `BASE_SEPOLIA_RPC_URL` / `BASE_RPC_URL`). B20
 |---|---|
 | `src/launch/` | launch core: hook, factory (ERC-20 and B20, Standard and Economy), operations, validation, fee math, ERC-20 token |
 | `src/place/` | `PlaceCreatorVault`, `PlaceCommunityVault`, `PlaceRewardsDistributor`, `PlaceRewardTokenRegistry`, `XRecipientRegistry`, `PlaceLaunchBuyAdapter` |
-| `src/nft/` | `PlaceNftFactory`, `PlaceNftCollection`, `PlacePriceGuard` |
+| `src/nft/` | `PlaceNftFactory`, `PlaceNftCollection`, `PlaceNftSwapper`, `PlacePriceGuard` |
 | `src/staking/` | `PlaceStaking`: staking programs for any token (GPL-3.0-only) |
 | `src/FeeEscrow.sol`, `src/AnnouncementRegistry.sol`, `src/base/` | fee escrow (pull claims, reward accounts, burn), announcements, v4 hook base |
 | `script/DeployPlaceLaunch.s.sol` | mines the hook address and deploys + wires the suite |

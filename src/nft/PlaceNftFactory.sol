@@ -11,6 +11,8 @@ import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 
 import {PlaceNftCollection} from "./PlaceNftCollection.sol";
+import {PlaceNftSwapper} from "./PlaceNftSwapper.sol";
+import {IPlaceNftFactory} from "./interfaces/IPlaceNft.sol";
 
 /// @notice The launch-factory views used to find a Place token's creator and launch pool.
 interface IPlaceLaunchFactoryViews {
@@ -37,8 +39,10 @@ interface IOwnable {
 }
 
 /// @title PlaceNftFactory
-/// @notice Creates PlaceNftCollection clones. Anyone can create a collection for any token (or none). A collection
-///         is **official** when its creator is the creator of the linked token at creation:
+/// @notice Creates PlaceNftCollection clones. Anyone can create a collection paired with any token that has a
+///         route from ETH (its Place launch pool or a PlaceRewardTokenRegistry route), or a free collection with
+///         no pair. The factory deploys one PlaceNftSwapper that every collection swaps through. A collection
+///         is **official** when its creator is the creator of the pair token at creation:
 ///         - Place tokens: the current creator in a listed Place launch factory;
 ///         - other tokens: the creator in the project registry (if set), else the token's `owner()`.
 ///         Owner (the platform): the creation fee, the platform recipient, the reward-token registry (swap routes),
@@ -49,6 +53,8 @@ contract PlaceNftFactory is Ownable2Step, ReentrancyGuard {
     uint256 public constant MAX_CREATION_FEE = 0.05 ether;
 
     IPoolManager public immutable poolManager;
+    /// @notice Routes and guarded swaps of every collection (reads the registry and the guard from here).
+    address public immutable swapper;
     address public implementation;
     address public platformRecipient;
     address public rewardRegistry;
@@ -84,6 +90,7 @@ contract PlaceNftFactory is Ownable2Step, ReentrancyGuard {
     error WrongFee(uint256 sent, uint256 expected);
     error InvalidLaunchPool();
     error FeeTransferFailed();
+    error InvalidRewardToken();
 
     struct Settings {
         address implementation;
@@ -97,6 +104,7 @@ contract PlaceNftFactory is Ownable2Step, ReentrancyGuard {
     constructor(IPoolManager manager, address initialOwner, Settings memory s) Ownable(initialOwner) {
         if (address(manager) == address(0)) revert InvalidConfig();
         poolManager = manager;
+        swapper = address(new PlaceNftSwapper(manager, IPlaceNftFactory(address(this))));
         _setImplementation(s.implementation);
         _setPlatformRecipient(s.platformRecipient);
         _setCreationFee(s.creationFee);
@@ -106,7 +114,8 @@ contract PlaceNftFactory is Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice Creates a collection owned by the caller. `p.launchPool` (optional) must be the Place launch pool of
-    ///         `p.token`; it lets the collection buy back and price the token without a registry route.
+    ///         `p.token`. A pair token needs a route from ETH (that pool, or a registry route) and the reward token
+    ///         must be ETH, the pair token or a token with a registry route from ETH.
     function createCollection(PlaceNftCollection.InitParams calldata p)
         external
         payable
@@ -115,9 +124,13 @@ contract PlaceNftFactory is Ownable2Step, ReentrancyGuard {
     {
         if (msg.value != creationFee) revert WrongFee(msg.value, creationFee);
         if (p.launchPool.tickSpacing != 0 && !isLaunchPool(p.token, p.launchPool)) revert InvalidLaunchPool();
+        if (p.token != address(0)) {
+            PlaceNftSwapper(payable(swapper)).ethRoute(p.token, p.launchPool); // reverts NoRoute
+            if (!PlaceNftSwapper(payable(swapper)).isRewardToken(p.token, p.rewardToken)) revert InvalidRewardToken();
+        }
         bool official = isTokenCreator(p.token, msg.sender);
         collection = Clones.clone(implementation);
-        PlaceNftCollection(payable(collection)).initialize(p, msg.sender, official, poolManager);
+        PlaceNftCollection(payable(collection)).initialize(p, msg.sender, official);
         isCollection[collection] = true;
         _collections.push(collection);
         if (p.token != address(0)) _collectionsOf[p.token].push(collection);

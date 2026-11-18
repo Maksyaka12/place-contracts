@@ -31,7 +31,7 @@ interface IB20 {
 /// renounceLastAdmin, then rename, transfer, approve and transferFrom.
 /// Needs TEST_DEPLOYER_PRIVATE_KEY and TEST_METADATA_PRIVATE_KEY in .env (testnet keys only):
 ///   forge script script/L0B20Sepolia.s.sol:B20Sepolia --rpc-url https://base-sepolia-rpc.publicnode.com \
-///     --hardfork base:Cobalt --broadcast
+///     --hardfork base:Denim --broadcast
 contract B20Sepolia is Script {
     IB20Factory constant FACTORY = IB20Factory(0xB20f000000000000000000000000000000000000);
     uint256 constant SUPPLY = 1_000_000_000e18;

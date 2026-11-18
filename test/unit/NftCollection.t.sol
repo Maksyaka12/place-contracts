@@ -3,20 +3,27 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC2981} from "@openzeppelin/contracts/interfaces/IERC2981.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {MockERC20} from "v4-core/lib/solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {LaunchFixture} from "../utils/LaunchFixture.sol";
 import {PlaceLaunchFactoryCore} from "../../src/launch/PlaceLaunchFactoryCore.sol";
 import {PlaceNftCollection} from "../../src/nft/PlaceNftCollection.sol";
 import {PlaceNftFactory} from "../../src/nft/PlaceNftFactory.sol";
+import {PlaceNftSwapper} from "../../src/nft/PlaceNftSwapper.sol";
 import {PlacePriceGuard} from "../../src/nft/PlacePriceGuard.sol";
 
-contract OwnedToken {
+/// @dev An external (non-Place) token whose `owner()` is its creator.
+contract OwnedToken is MockERC20 {
     address public owner;
 
-    constructor(address o) {
+    constructor(address o) MockERC20("Owned", "OWN", 18) {
         owner = o;
     }
 }
@@ -47,8 +54,10 @@ contract NftCollectionTest is LaunchFixture {
 
     address internal constant ALICE = address(0xA11CE);
     address internal constant BOB = address(0xB0B);
+    address internal constant CAROL = address(0xCA201);
     address internal constant ATTACKER = address(0xBAD);
     address internal constant DEAD = 0x000000000000000000000000000000000000dEaD;
+    address internal constant ETH = address(0);
     uint128 internal constant PRICE = 0.001 ether;
 
     address internal token;
@@ -64,12 +73,16 @@ contract NftCollectionTest is LaunchFixture {
         vm.warp(vm.getBlockTimestamp() + 21); // after the anti-snipe window
         _swap(TRADER, key, token, true, 0.01 ether);
         _swap(ALICE, key, token, true, 0.01 ether);
-        _warmGuard(route);
+        PoolKey[] memory both = new PoolKey[](2);
+        both[0] = key;
+        both[1] = ethUsd;
+        _warmGuard(both);
         c = _create(CREATOR, _p());
     }
 
     // ───────────────────────────── helpers ─────────────────────────────
 
+    /// @dev Place token pair, holders paid in ETH, 50 / 30 / 20.
     function _p() internal view returns (PlaceNftCollection.InitParams memory p) {
         p.name = "Place Club";
         p.symbol = "CLUB";
@@ -78,10 +91,11 @@ contract NftCollectionTest is LaunchFixture {
         p.uriSuffix = ".json";
         p.contractURI = "ipfs://collection";
         p.maxSupply = 100;
-        p.maxPerWallet = 5;
+        p.maxPerWallet = 0;
         p.mintPrice = PRICE;
         p.token = token;
         p.tokenPayments = true;
+        p.rewardToken = ETH;
         p.royaltyBps = 500;
         p.economy = PlaceNftCollection.Economy({creatorBps: 5_000, holdersBps: 3_000, burnBps: 2_000});
         p.launchPool = key;
@@ -101,14 +115,40 @@ contract NftCollectionTest is LaunchFixture {
         first = c.mint{value: cost}(who, qty);
     }
 
+    function _mintToken(address who, uint256 qty) internal returns (uint256 paid) {
+        address pair = c.token();
+        uint256 due = c.quoteTokenPrice(qty);
+        vm.startPrank(who);
+        IERC20(pair).approve(address(c), due);
+        (, paid) = c.mintWithToken(who, qty, due);
+        vm.stopPrank();
+    }
+
     function _ids(uint256 a) internal pure returns (uint256[] memory ids) {
         ids = new uint256[](1);
         ids[0] = a;
     }
 
+    function _reward(uint256 id) internal view returns (uint256) {
+        return c.claimable(id);
+    }
+
+    /// @dev Moves `n` whole UTC days ahead (same time of day).
+    function _days(uint256 n) internal {
+        vm.warp(vm.getBlockTimestamp() + n * 1 days);
+        vm.roll(vm.getBlockNumber() + 1);
+    }
+
+    /// @dev Moves to `secondsIntoDay` of the next UTC day.
+    function _toNextDayAt(uint256 secondsIntoDay) internal {
+        vm.warp((vm.getBlockTimestamp() / 1 days + 1) * 1 days + secondsIntoDay);
+        vm.roll(vm.getBlockNumber() + 1);
+    }
+
     function _assertSolvent() internal view {
-        assertGe(address(c).balance, c.reserved(address(0)), "ETH solvent");
+        assertGe(address(c).balance, c.reserved(ETH), "ETH solvent");
         assertGe(IERC20(token).balanceOf(address(c)), c.reserved(token), "token solvent");
+        assertGe(usd.balanceOf(address(c)), c.reserved(address(usd)), "usd solvent");
     }
 
     function _next() internal {
@@ -116,26 +156,83 @@ contract NftCollectionTest is LaunchFixture {
         vm.roll(vm.getBlockNumber() + 1);
     }
 
+    /// @dev An external token with an ETH pool (no hook, 1 ETH ~ 2000 tokens) and a registry route.
+    function _externalPair(address tokenOwner) internal returns (OwnedToken t, PoolKey memory k) {
+        t = new OwnedToken(tokenOwner);
+        k = PoolKey(Currency.wrap(ETH), Currency.wrap(address(t)), 3000, 60, IHooks(address(0)));
+        pm.initialize(k, TickMath.getSqrtPriceAtTick(76_020));
+        t.mint(address(this), 1_000_000e18);
+        t.approve(address(lp), type(uint256).max);
+        vm.deal(address(this), address(this).balance + 20 ether);
+        lp.modifyLiquidity{value: 20 ether}(k, IPoolManager.ModifyLiquidityParams(-887_220, 887_220, 1e20, 0), "");
+        PoolKey[] memory r = new PoolKey[](1);
+        r[0] = k;
+        rewards.setRoute(ETH, address(t), r);
+    }
+
     // ───────────────────────────── factory ─────────────────────────────
 
-    function test_create_officialFlagAndFee() public {
+    function test_create_officialFlagFeeAndSwapper() public {
         uint256 platformBefore = PLATFORM.balance;
         assertTrue(c.official(), "token creator");
         assertEq(c.owner(), CREATOR);
+        assertEq(c.rewardToken(), ETH);
         assertTrue(nftFactory.isCollection(address(c)));
         assertEq(nftFactory.collectionsOf(token)[0], address(c));
+        assertEq(address(PlaceNftSwapper(payable(nftFactory.swapper())).factory()), address(nftFactory));
         PlaceNftCollection other = _create(BOB, _p());
         assertFalse(other.official(), "anyone else: no badge");
-        assertEq(nftFactory.collectionsOf(token).length, 2);
         assertEq(PLATFORM.balance - platformBefore, nftFactory.creationFee(), "creation fee to the platform");
 
-        // External token: owner() decides.
+        // External token with a registry route: owner() decides.
+        (OwnedToken ext,) = _externalPair(BOB);
         PlaceNftCollection.InitParams memory p = _p();
-        p.token = address(new OwnedToken(BOB));
+        p.token = address(ext);
         p.launchPool.tickSpacing = 0;
-        p.tokenPayments = false;
         assertTrue(_create(BOB, p).official());
         assertFalse(_create(ALICE, p).official());
+    }
+
+    function test_create_requiresRoutes() public {
+        vm.deal(CREATOR, 1 ether);
+        // A token without a Place pool or a registry route.
+        PlaceNftCollection.InitParams memory p = _p();
+        p.token = address(new OwnedToken(CREATOR));
+        p.launchPool.tickSpacing = 0;
+        vm.prank(CREATOR);
+        vm.expectRevert(PlaceNftSwapper.NoRoute.selector);
+        nftFactory.createCollection{value: 0.0005 ether}(p);
+
+        // A Place token without its launch pool (no registry route either).
+        p = _p();
+        p.launchPool.tickSpacing = 0;
+        vm.prank(CREATOR);
+        vm.expectRevert(PlaceNftSwapper.NoRoute.selector);
+        nftFactory.createCollection{value: 0.0005 ether}(p);
+
+        // Reward token without a route from ETH.
+        p = _p();
+        p.rewardToken = address(new OwnedToken(CREATOR));
+        vm.prank(CREATOR);
+        vm.expectRevert(PlaceNftFactory.InvalidRewardToken.selector);
+        nftFactory.createCollection{value: 0.0005 ether}(p);
+
+        // Paid mint without a pair token.
+        p = _p();
+        p.token = ETH;
+        p.launchPool.tickSpacing = 0;
+        p.tokenPayments = false;
+        p.economy = PlaceNftCollection.Economy({creatorBps: 7_000, holdersBps: 3_000, burnBps: 0});
+        vm.prank(CREATOR);
+        vm.expectRevert(PlaceNftCollection.InvalidConfig.selector);
+        nftFactory.createCollection{value: 0.0005 ether}(p);
+
+        // Free collection without a pair: fine (royalties only, holders in ETH).
+        p.mintPrice = 0;
+        PlaceNftCollection free = _create(CREATOR, p);
+        vm.expectRevert(PlaceNftCollection.InvalidConfig.selector);
+        vm.prank(CREATOR);
+        free.setMint(1, 0, 0, false);
     }
 
     function test_create_rejectsWrongPoolFeeAndEconomy() public {
@@ -161,69 +258,197 @@ contract NftCollectionTest is LaunchFixture {
         vm.prank(CREATOR);
         vm.expectRevert(PlaceNftCollection.InvalidConfig.selector);
         nftFactory.createCollection{value: 0.0005 ether}(p);
-
-        p = _p();
-        p.token = address(0);
-        p.launchPool.tickSpacing = 0;
-        p.tokenPayments = false; // burn share without a token
-        vm.prank(CREATOR);
-        vm.expectRevert(PlaceNftCollection.InvalidConfig.selector);
-        nftFactory.createCollection{value: 0.0005 ether}(p);
     }
 
     // ───────────────────────────── ETH economy ─────────────────────────────
 
-    function test_mintEth_splitsTwentyPercentPlatformAndCreatorShares() public {
+    /// @notice The first mint has no holders: their share goes to the creator; the burn share buys and burns the
+    ///         pair token in the same transaction.
+    function test_firstMint_holdersShareToCreator_burnAtOnce() public {
+        uint256 deadBefore = IERC20(token).balanceOf(DEAD);
         _mint(ALICE, 2); // 0.002 ETH
-        assertEq(c.platformOwed(address(0)), 0.0004 ether, "20%");
-        assertEq(c.creatorOwed(address(0)), 0.0008 ether, "50% of 80%");
-        assertEq(c.buybackPending(), 0.00032 ether, "20% of 80%");
-        (uint256 e1,) = c.claimable(1);
-        (uint256 e2,) = c.claimable(2);
-        assertEq(e1 + e2, 0.00048 ether, "30% of 80% to holders");
-        assertEq(address(c).balance, 0.002 ether);
-        assertEq(c.reserved(address(0)), 0.002 ether);
+        assertEq(c.platformOwed(ETH), 0.0004 ether, "20%");
+        assertEq(c.creatorOwed(ETH), 0.00128 ether, "50% + the 30% holders share of 80%");
+        assertEq(c.buybackPending(), 0, "burn share swapped in the mint");
+        assertGt(c.totalBurned(), 0);
+        assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, c.totalBurned());
+        assertEq(_reward(1) + _reward(2), 0, "the minter gets nothing back");
+        assertEq(c.reserved(ETH), 0.00168 ether);
+        assertEq(address(c).balance, 0.00168 ether);
 
         uint256 platformBefore = PLATFORM.balance;
-        c.payPlatform(address(0));
-        c.payCreator(address(0));
+        c.payOut(ETH);
         assertEq(PLATFORM.balance - platformBefore, 0.0004 ether);
-        assertEq(CREATOR.balance, 0.0008 ether);
+        assertEq(CREATOR.balance, 0.00128 ether);
         vm.expectRevert(PlaceNftCollection.NothingToDo.selector);
-        c.payCreator(address(0));
+        c.payOut(ETH);
         _assertSolvent();
     }
 
-    function test_holders_accumulatorPerNft() public {
-        _mint(ALICE, 1); // holders: 0.00024 ETH to NFT 1 (the only one)
-        _mint(BOB, 1); // 0.00024 ETH split between NFTs 1 and 2
-        (uint256 a,) = c.claimable(1);
-        (uint256 b,) = c.claimable(2);
-        assertEq(a, 0.00024 ether + 0.00012 ether);
-        assertEq(b, 0.00012 ether, "NFT 2 earns only from its own mint on");
+    /// @notice The holders share goes to a pool paid over 30 days: nothing on the mint day, 1/30 per UTC day
+    ///         to every NFT that exists at 00:00, and nothing more after the 30th day.
+    function test_pool_paysOverThirtyDays() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 1); // first mint: holders share to the creator, pool empty
+        assertEq(c.rewardRate(), 0);
+        _mint(BOB, 1); // 0.00024 ETH into the pool (one NFT existed); BOB's NFT also earns from tomorrow
+        uint64 today = uint64(vm.getBlockTimestamp() / 1 days);
+        assertEq(c.periodFinish(), today + 30);
+        assertEq(c.rewardRate(), uint256(0.00024 ether) * 1e36 / 30);
+        assertEq(_reward(1), 0, "nothing accrues on the income day");
+        _days(1);
+        assertEq(_reward(1), 0.00024 ether / 30 / 2);
+        assertEq(_reward(2), 0.00024 ether / 30 / 2);
+        _days(29);
+        assertApproxEqAbs(_reward(1), 0.00012 ether, 1);
+        _days(10);
+        assertApproxEqAbs(_reward(1), 0.00012 ether, 1, "the pool ended after 30 days");
+        uint256 before = ALICE.balance;
+        vm.prank(ALICE);
+        uint256 paid = c.claim(_ids(1));
+        assertEq(ALICE.balance - before, paid);
+        assertEq(_reward(1), 0);
+        _assertSolvent();
+    }
+
+    /// @notice A second income after one day re-spreads what is left plus the new income over 30 new days.
+    function test_pool_secondIncomeAfterOneDay() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 1);
+        _mint(BOB, 1); // X = 0.00024 over 2 NFTs
+        _days(1); // day 1: X/30 accrued
+        _mint(CAROL, 1); // Y = 0.00024 (2 NFTs before it), pool = 29X/30 + Y over 30 days, 3 NFTs from now
+        uint64 today = uint64(vm.getBlockTimestamp() / 1 days);
+        assertEq(c.periodFinish(), today + 30);
+        uint256 x = 0.00024 ether;
+        assertApproxEqAbs(c.rewardRate(), (x * 29 / 30 + x) * 1e36 / 30, 1e36);
+        uint256 firstDay = x / 30 / 2;
+        assertEq(_reward(1), firstDay);
+        assertEq(_reward(3), 0, "CAROL gets nothing from the day already accrued");
+        _days(30);
+        uint256 rest = (x * 29 / 30 + x) / 3;
+        assertApproxEqAbs(_reward(1), firstDay + rest, 3);
+        assertApproxEqAbs(_reward(3), rest, 3, "but shares the running pool equally");
+        assertApproxEqAbs(_reward(1) + _reward(2) + _reward(3), 2 * x, 10, "every income is paid in full");
+        _assertSolvent();
+    }
+
+    /// @notice A second income after 30 days finds the pool finished and starts a new one of its own.
+    function test_pool_secondIncomeAfterThirtyDays() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 1);
+        _mint(BOB, 1); // X over 2 NFTs
+        _days(30);
+        uint256 x = 0.00024 ether;
+        assertApproxEqAbs(_reward(1), x / 2, 1);
+        _mint(CAROL, 1); // Y alone over the next 30 days, 3 NFTs
+        assertEq(c.rewardRate(), x * 1e36 / 30);
+        _days(30);
+        assertApproxEqAbs(_reward(1), x / 2 + x / 3, 2);
+        assertApproxEqAbs(_reward(3), x / 3, 2);
+        _assertSolvent();
+    }
+
+    /// @notice 5 -> 10 -> 50 NFTs: equal per NFT at each daily accrual; the newest NFTs miss the days before them.
+    function test_pool_perNftAsTheCollectionGrows() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 5); // first mint: to the creator
+        _mint(BOB, 5); // X = 0.0012
+        _days(10); // 10 days of X/30 over 10 NFTs
+        _mint(CAROL, 40); // Y = 0.0096, 50 NFTs from tomorrow
+        uint256 x = 0.0012 ether;
+        uint256 tenDays = x / 30 * 10 / 10;
+        assertApproxEqAbs(_reward(1), tenDays, 1);
+        assertApproxEqAbs(_reward(6), tenDays, 1, "BOB shares the pool from the first accrual after his mint");
+        assertEq(_reward(11), 0);
+        _days(30);
+        uint256 rest = (x * 20 / 30 + 0.0096 ether) / 50;
+        assertApproxEqAbs(_reward(1), tenDays + rest, 50);
+        assertApproxEqAbs(_reward(50), rest, 50);
+        _assertSolvent();
+    }
+
+    /// @notice A transfer mid-stream: the days accrued so far stay with the seller, later days go to the buyer.
+    function test_pool_transferMidStream() public {
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 1);
+        _mint(BOB, 1);
+        uint256 perDay = 0.00024 ether / 30 / 2;
+        _days(5);
+        vm.prank(ALICE);
+        c.transferFrom(ALICE, CAROL, 1);
+        assertEq(c.credit(ALICE), 5 * perDay, "credited to the seller");
+        assertEq(_reward(1), 0, "the buyer starts from now");
+        _days(5);
+        assertEq(_reward(1), 5 * perDay);
 
         uint256 before = ALICE.balance;
         vm.prank(ALICE);
-        (uint256 paid,) = c.claim(_ids(1));
-        assertEq(paid, a);
-        assertEq(ALICE.balance - before, a);
-        (a,) = c.claimable(1);
-        assertEq(a, 0);
-
-        vm.expectRevert(abi.encodeWithSelector(PlaceNftCollection.NotTokenOwner.selector, 2));
+        c.claim(new uint256[](0)); // the seller claims without the NFT
+        assertEq(ALICE.balance - before, 5 * perDay);
+        vm.expectRevert(abi.encodeWithSelector(PlaceNftCollection.NotTokenOwner.selector, 1));
         vm.prank(ALICE);
-        c.claim(_ids(2));
-
-        // Unclaimed rewards travel with the NFT.
-        vm.prank(BOB);
-        c.transferFrom(BOB, ALICE, 2);
-        vm.prank(ALICE);
-        (paid,) = c.claim(_ids(2));
-        assertEq(paid, 0.00012 ether);
+        c.claim(_ids(1));
+        before = CAROL.balance;
+        vm.prank(CAROL);
+        c.claim(_ids(1));
+        assertEq(CAROL.balance - before, 5 * perDay);
         _assertSolvent();
     }
 
+    /// @notice Accruals happen at 00:00 UTC exactly: one second before, nothing; at midnight, one portion.
+    function test_pool_utcDayBoundary() public {
+        _toNextDayAt(1 days - 2); // 23:59:58
+        _mint(ALICE, 1);
+        _mint(BOB, 1);
+        vm.warp(vm.getBlockTimestamp() + 1); // 23:59:59
+        assertEq(_reward(1), 0);
+        vm.warp(vm.getBlockTimestamp() + 1); // 00:00:00
+        assertEq(_reward(1), 0.00024 ether / 30 / 2);
+        vm.warp(vm.getBlockTimestamp() + 1 days - 1); // 23:59:59 of the same day
+        assertEq(_reward(1), 0.00024 ether / 30 / 2, "one portion per day");
+    }
+
+    /// @notice Odd amounts and NFT counts: holders never get more than the pool, and the dust left is tiny.
+    function test_pool_roundingDust() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.mintPrice = 0.000777777777777777 ether;
+        c = _create(CREATOR, p);
+        _toNextDayAt(12 hours);
+        _mint(ALICE, 3);
+        _mint(BOB, 4); // income over 3 NFTs, then 7 NFTs accrue
+        _days(3);
+        _mint(CAROL, 2); // second income
+        _days(31);
+        uint256 paid = uint256(0.000777777777777777 ether) * 6;
+        uint256 rest = paid - paid * 2_000 / 10_000;
+        uint256 income = rest * 3_000 / 10_000; // BOB's and CAROL's mints
+        uint256 sum;
+        for (uint256 id = 1; id <= 9; id++) {
+            sum += _reward(id);
+        }
+        assertLe(sum, income + 1, "never more than the pool");
+        assertLe(income - Math.min(sum, income), 20, "dust of a few wei");
+        address[3] memory who = [ALICE, BOB, CAROL];
+        uint256 next;
+        for (uint256 i = 0; i < 3; i++) {
+            uint256 n = i == 0 ? 3 : i == 1 ? 4 : 2;
+            uint256[] memory ids = new uint256[](n);
+            for (uint256 j = 0; j < n; j++) {
+                ids[j] = ++next;
+            }
+            vm.prank(who[i]);
+            c.claim(ids);
+        }
+        c.payOut(ETH);
+        assertEq(address(c).balance, c.reserved(ETH), "only the dust stays reserved");
+        assertLe(c.reserved(ETH), 20);
+    }
+
     function test_mint_limitsAndWindow() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.maxPerWallet = 5;
+        c = _create(CREATOR, p);
         vm.deal(ALICE, 1 ether);
         vm.prank(ALICE);
         vm.expectRevert(abi.encodeWithSelector(PlaceNftCollection.WrongPayment.selector, 0, PRICE));
@@ -234,7 +459,7 @@ contract NftCollectionTest is LaunchFixture {
         c.mint{value: PRICE}(ALICE, 1);
 
         vm.prank(CREATOR);
-        c.setMintWindow(uint64(block.timestamp + 1 days), 0);
+        c.setMint(PRICE, uint64(block.timestamp + 1 days), 0, true);
         vm.deal(BOB, 1 ether);
         vm.expectRevert(PlaceNftCollection.MintClosed.selector);
         vm.prank(BOB);
@@ -242,12 +467,10 @@ contract NftCollectionTest is LaunchFixture {
         vm.warp(block.timestamp + 1 days);
         _mint(BOB, 1);
 
-        PlaceNftCollection.InitParams memory p = _p();
+        p = _p();
         p.maxSupply = 3;
-        p.maxPerWallet = 0;
         c = _create(CREATOR, p);
         _mint(BOB, 3);
-        vm.deal(BOB, 1 ether);
         vm.expectRevert(PlaceNftCollection.SoldOut.selector);
         vm.prank(BOB);
         c.mint{value: PRICE}(BOB, 1);
@@ -260,10 +483,10 @@ contract NftCollectionTest is LaunchFixture {
         c = _create(CREATOR, p);
         _mint(ALICE, 2);
         assertEq(c.totalSupply(), 2);
-        assertEq(c.reserved(address(0)), 0);
+        assertEq(c.reserved(ETH), 0);
         vm.expectRevert(PlaceNftCollection.InvalidConfig.selector);
         vm.prank(CREATOR);
-        c.setTokenPayments(true);
+        c.setMint(0, 0, 0, true);
     }
 
     // ───────────────────────────── metadata ─────────────────────────────
@@ -297,58 +520,170 @@ contract NftCollectionTest is LaunchFixture {
         assertTrue(c.supportsInterface(0x80ac58cd)); // ERC-721
     }
 
+    // ───────────────────────────── reward token and swaps ─────────────────────────────
+
+    /// @notice Holders paid in USD: the ETH holders share is swapped ETH -> USD in the mint transaction and the
+    ///         USD joins the pool.
+    function test_rewardToken_ethShareSwappedInTheMint() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.rewardToken = address(usd);
+        c = _create(CREATOR, p);
+        _mint(ALICE, 1);
+        _mint(BOB, 1); // 0.00024 ETH -> ~0.48 USD into the pool
+        assertEq(c.pendingHolders(ETH), 0);
+        assertEq(c.buybackPending(), 0);
+        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.48e18, 0.02e18, "1 ETH ~ 2000 USD, minus the pool fee");
+        _days(30);
+        uint256 r = _reward(1);
+        assertApproxEqRel(r, 0.24e18, 0.02e18, "half of the pool over 2 NFTs");
+        vm.prank(ALICE);
+        c.claim(_ids(1));
+        assertEq(usd.balanceOf(ALICE), r);
+        _assertSolvent();
+    }
+
+    /// @notice Paid in the pair token, holders paid in ETH: the token share is sold through the launch pool.
+    function test_rewardToken_tokenPaymentSwappedToEth() public {
+        _mint(ALICE, 1);
+        _mintToken(ALICE, 1);
+        assertEq(c.pendingHolders(token), 0);
+        assertApproxEqRel(
+            c.rewardRate() * 30 / 1e36, 0.00024 ether, 0.05e18, "the ETH value of the token share, minus tax and fees"
+        );
+        _assertSolvent();
+    }
+
+    /// @notice Pair token, holders paid in USD: token -> ETH (launch pool) -> USD in one guarded swap.
+    function test_rewardToken_twoHopsFromThePairToken() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.rewardToken = address(usd);
+        c = _create(CREATOR, p);
+        _mint(ALICE, 1);
+        _mintToken(ALICE, 1);
+        assertEq(c.pendingHolders(token), 0);
+        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.48e18, 0.06e18);
+        _assertSolvent();
+    }
+
+    /// @notice A non-Place pair: any token with a registry route. Token mints, burns and buybacks use the route.
+    function test_nonPlacePair_routeFromTheRegistry() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.token = address(usd);
+        p.launchPool.tickSpacing = 0;
+        c = _create(CREATOR, p);
+        assertFalse(c.official());
+
+        uint256 deadBefore = usd.balanceOf(DEAD);
+        _mint(ALICE, 1); // first mint: the ETH burn share buys USD and burns it
+        uint256 burnedByEth = usd.balanceOf(DEAD) - deadBefore;
+        assertApproxEqRel(burnedByEth, 0.00016 ether * 2000, 0.02e18);
+
+        usd.mint(BOB, 100e18);
+        uint256 due = c.quoteTokenPrice(1);
+        assertApproxEqRel(due, 2e18, 0.02e18, "0.001 ETH ~ 2 USD");
+        uint256 paid = _mintToken(BOB, 1);
+        uint256 rest = paid - paid * 2_000 / 10_000;
+        assertEq(usd.balanceOf(DEAD) - deadBefore - burnedByEth, rest * 2_000 / 10_000, "USD burn share at once");
+        assertEq(c.totalBurned(), usd.balanceOf(DEAD) - deadBefore);
+        // The USD holders share was sold for ETH (the reward token) in the same mint.
+        assertApproxEqRel(c.rewardRate() * 30 / 1e36, 0.00024 ether, 0.02e18);
+        _assertSolvent();
+    }
+
+    // ───────────────────────────── deferred swaps ─────────────────────────────
+
+    /// @notice While the pair's price is manipulated the mint still succeeds; the swaps wait, and the holders
+    ///         share joins the pool when a later mint swaps it.
+    function test_deferral_mintNeverFails_poolFundedOnSwap() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.rewardToken = token; // holders paid in the pair token
+        c = _create(CREATOR, p);
+        _mint(ALICE, 1);
+        _next();
+        _swap(ATTACKER, key, token, true, 0.05 ether); // pump: spot > 3% off the reference
+        _mint(BOB, 1);
+        _mint(CAROL, 1);
+        assertEq(c.pendingHolders(ETH), 0.00024 ether + 0.00024 ether);
+        assertEq(c.buybackPending(), 0.00032 ether);
+        assertEq(c.rewardRate(), 0, "nothing in the pool before the swap");
+
+        _swap(ATTACKER, key, token, false, IERC20(token).balanceOf(ATTACKER)); // price back in the band
+        _next();
+        uint256 deadBefore = IERC20(token).balanceOf(DEAD);
+        _mint(ALICE, 1); // swaps everything waiting (and this mint's share) into the pool
+        assertEq(c.pendingHolders(ETH), 0);
+        assertEq(c.buybackPending(), 0, "waiting burn ran");
+        assertGt(IERC20(token).balanceOf(DEAD) - deadBefore, 0);
+        uint256 funded = c.rewardRate() * 30 / 1e36;
+        assertGt(funded, 0);
+        _days(30);
+        assertApproxEqAbs(_reward(1), funded / 4, 4, "4 NFTs exist at every accrual after the swap");
+        _assertSolvent();
+    }
+
     // ───────────────────────────── royalties ─────────────────────────────
 
-    function test_royalties_ethTokenAndOtherAssets() public {
+    /// @notice ETH royalties wait for the next mint (or `processPending` after sold out) and join the pool.
+    function test_royalties_ethWaitsThenJoinsThePool() public {
+        PlaceNftCollection.InitParams memory p = _p();
+        p.maxSupply = 3;
+        c = _create(CREATOR, p);
+        _toNextDayAt(12 hours);
         _mint(ALICE, 2);
         (address receiver, uint256 amount) = c.royaltyInfo(1, 1 ether);
         assertEq(receiver, address(c));
         assertEq(amount, 0.05 ether);
 
         vm.deal(address(this), 1 ether);
-        (bool ok,) = address(c).call{value: 0.05 ether}("");
+        (bool ok,) = address(c).call{value: 0.05 ether}(""); // a marketplace pays the royalty
         assertTrue(ok);
-        uint256 creatorBefore = c.creatorOwed(address(0));
-        assertEq(c.distributeRoyalties(address(0)), 0.05 ether);
-        assertEq(c.creatorOwed(address(0)) - creatorBefore, 0.02 ether, "50% of 80%");
-        (uint256 e1,) = c.claimable(1);
-        assertEq(e1, 0.00024 ether + 0.006 ether, "30% of 80% over 2 NFTs");
-        vm.expectRevert(PlaceNftCollection.NothingToDo.selector);
-        c.distributeRoyalties(address(0));
+        assertEq(c.rewardRate(), 0, "nothing split yet");
+        uint256 creatorBefore = c.creatorOwed(ETH);
+        _mint(BOB, 1); // sold out
+        assertEq(c.creatorOwed(ETH) - creatorBefore, 0.02 ether + 0.0004 ether);
+        uint256 x = 0.012 ether + 0.00024 ether; // 30% of 80% of the royalty and of the mint
+        assertEq(c.rewardRate(), x * 1e36 / 30);
 
-        // Royalty in the linked token: the burn share is burned at once.
-        uint256 deadBefore = IERC20(token).balanceOf(DEAD);
-        vm.prank(TRADER);
-        IERC20(token).transfer(address(c), 1_000e18);
-        c.distributeRoyalties(token);
-        assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, 160e18, "20% of 80%");
-        (, uint256 t1) = c.claimable(1);
-        assertEq(t1, 120e18);
-        assertEq(c.totalBurned(token), 160e18);
-
-        // Any other ERC-20: 20% platform, 80% creator.
-        usd.mint(address(c), 100e18);
-        c.distributeRoyalties(address(usd));
-        assertEq(usd.balanceOf(PLATFORM), 20e18);
-        assertEq(usd.balanceOf(CREATOR), 80e18);
+        // Sold out: anyone splits later royalties into the pool.
+        _days(10);
+        (ok,) = address(c).call{value: 0.03 ether}("");
+        assertEq(c.processPending(ETH), 0.03 ether);
+        assertEq(c.processPending(ETH), 0, "nothing new: no revert");
+        _days(30);
+        uint256 total = _reward(1) + _reward(2) + _reward(3);
+        assertApproxEqAbs(total, x + 0.0072 ether, 10, "both incomes paid in full");
         _assertSolvent();
     }
 
-    function test_royalties_wethIsUnwrapped() public {
+    function test_royalties_wethTokenAndOtherAssets() public {
         MockWETH weth = new MockWETH();
         nftFactory.setWeth(address(weth));
         _mint(ALICE, 1);
         weth.deposit{value: 0.01 ether}();
         weth.transfer(address(c), 0.01 ether);
-        uint256 creatorBefore = c.creatorOwed(address(0));
-        assertEq(c.distributeRoyalties(address(weth)), 0.01 ether);
+        uint256 creatorBefore = c.creatorOwed(ETH);
+        assertEq(c.processPending(address(weth)), 0.01 ether);
         assertEq(weth.balanceOf(address(c)), 0);
-        assertEq(c.creatorOwed(address(0)) - creatorBefore, 0.004 ether);
-        assertEq(c.buybackPending(), 0.00016 ether + 0.0016 ether);
+        assertEq(c.creatorOwed(ETH) - creatorBefore, 0.004 ether);
+        assertEq(c.rewardRate(), uint256(0.0024 ether) * 1e36 / 30, "30% of 80% into the pool");
+
+        // Royalty in the pair token: its burn share is burned at once.
+        uint256 deadBefore = IERC20(token).balanceOf(DEAD);
+        vm.prank(TRADER);
+        IERC20(token).transfer(address(c), 1_000e18);
+        c.processPending(token);
+        assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, 160e18, "20% of 80%");
+
+        // Any other ERC-20: 20% platform, 80% creator.
+        usd.mint(address(c), 100e18);
+        c.processPending(address(usd));
+        c.payOut(address(usd));
+        assertEq(usd.balanceOf(PLATFORM), 20e18);
+        assertEq(usd.balanceOf(CREATOR), 80e18);
         _assertSolvent();
     }
 
-    function test_royalties_settable_capped() public {
+    function test_royalties_settableCapped() public {
         vm.prank(CREATOR);
         c.setRoyaltyBps(1_000);
         vm.expectRevert(PlaceNftCollection.InvalidConfig.selector);
@@ -360,7 +695,7 @@ contract NftCollectionTest is LaunchFixture {
 
     function test_mintWithToken_marketPriceAndBurn() public {
         uint256 due = c.quoteTokenPrice(1);
-        (uint256 refOut, uint256 spotOut) = guard.quote(route, address(0), PRICE);
+        (uint256 refOut, uint256 spotOut) = guard.quote(route, ETH, PRICE);
         assertEq(due, refOut > spotOut ? refOut : spotOut);
         assertGt(due, 0);
 
@@ -377,24 +712,24 @@ contract NftCollectionTest is LaunchFixture {
         uint256 rest = due - platform;
         assertEq(c.platformOwed(token), platform);
         assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, rest * 2_000 / 10_000, "token burn share burned");
-        (, uint256 t1) = c.claimable(1);
-        assertEq(t1, rest * 3_000 / 10_000);
+        assertEq(c.creatorOwed(token), rest - rest * 2_000 / 10_000, "first mint: holders share to the creator");
         _assertSolvent();
     }
 
     function test_mintWithToken_disabled() public {
         vm.prank(CREATOR);
-        c.setTokenPayments(false);
+        c.setMint(PRICE, 0, 0, false);
         vm.expectRevert(PlaceNftCollection.TokenPaymentsDisabled.selector);
         c.mintWithToken(ALICE, 1, type(uint256).max);
     }
 
-    /// @notice A flash pump in the same block (the token gets more expensive, so fewer tokens per ETH) does not
-    ///         lower what the buyer pays: the guard's reference from an earlier block sets the floor.
+    // ───────────────────────────── manipulation ─────────────────────────────
+
+    /// @notice A flash pump in the same block does not lower what a token buyer pays.
     function test_manipulation_smallPumpCannotLowerTokenPrice() public {
         uint256 dueBefore = c.quoteTokenPrice(1);
-        _swap(ATTACKER, key, token, true, 0.0002 ether); // pump in the same block
-        (uint256 refOut, uint256 spotOut) = guard.quote(route, address(0), PRICE);
+        _swap(ATTACKER, key, token, true, 0.0002 ether);
+        (uint256 refOut, uint256 spotOut) = guard.quote(route, ETH, PRICE);
         assertLt(spotOut, refOut, "spot says fewer tokens");
         assertEq(c.quoteTokenPrice(1), dueBefore, "buyer still pays the reference amount");
     }
@@ -408,19 +743,20 @@ contract NftCollectionTest is LaunchFixture {
         vm.expectPartialRevert(PlacePriceGuard.PriceDeviation.selector);
         c.mintWithToken(ALICE, 1, type(uint256).max);
         vm.stopPrank();
-        _mint(ALICE, 1); // ETH mints keep working
+        _mint(ALICE, 1); // ETH mints keep working; the burn waits
+        assertEq(c.buybackPending(), 0.00016 ether);
     }
 
     /// @notice An observation written in the current block is ignored by quotes in that block.
     function test_manipulation_pumpThenObserveSameBlockIgnored() public {
-        (uint256 refBefore,) = guard.quote(route, address(0), PRICE);
+        (uint256 refBefore,) = guard.quote(route, ETH, PRICE);
         _next();
         _swap(ATTACKER, key, token, true, 0.05 ether);
         guard.observeRoute(route);
         PlacePriceGuard.Observation memory o = guard.observation(key.toId());
         assertEq(o.updatedBlock, block.number);
-        _swap(ATTACKER, key, token, false, IERC20(token).balanceOf(ATTACKER)); // dump back
-        (uint256 refNow,) = guard.quote(route, address(0), PRICE);
+        _swap(ATTACKER, key, token, false, IERC20(token).balanceOf(ATTACKER));
+        (uint256 refNow,) = guard.quote(route, ETH, PRICE);
         assertEq(refNow, refBefore, "previous reference used in this block");
     }
 
@@ -432,29 +768,29 @@ contract NftCollectionTest is LaunchFixture {
         guard.observeRoute(route);
         uint160 ref1 = guard.observation(key.toId()).refPrice;
         assertLe(guard.deviationBps(ref0, ref1), GUARD_STEP + 1);
-        assertGt(ref1 != ref0 ? 1 : 0, 0);
-        // A second observation inside the interval is a no-op.
+        assertTrue(ref1 != ref0);
         vm.roll(block.number + 1);
         guard.observeRoute(route);
-        assertEq(guard.observation(key.toId()).refPrice, ref1);
-        // It still takes many intervals before quotes accept the pumped price.
+        assertEq(guard.observation(key.toId()).refPrice, ref1, "no second step inside the interval");
         _next();
         vm.expectPartialRevert(PlacePriceGuard.PriceDeviation.selector);
-        guard.quote(route, address(0), PRICE);
+        guard.quote(route, ETH, PRICE);
     }
 
     function test_guard_notReadyAndBounds() public {
+        (OwnedToken ext, PoolKey memory k) = _externalPair(BOB);
+        ext; // fresh pool, never observed
         PoolKey[] memory other = new PoolKey[](1);
-        other[0] = ethUsd;
-        vm.expectRevert(abi.encodeWithSelector(PlacePriceGuard.PriceNotReady.selector, ethUsd.toId(), 0));
-        guard.quote(other, address(0), 1 ether);
+        other[0] = k;
+        vm.expectRevert(abi.encodeWithSelector(PlacePriceGuard.PriceNotReady.selector, k.toId(), 0));
+        guard.quote(other, ETH, 1 ether);
         guard.observeRoute(other);
         vm.expectPartialRevert(PlacePriceGuard.PriceNotReady.selector);
-        guard.quote(other, address(0), 1 ether);
+        guard.quote(other, ETH, 1 ether);
         vm.warp(block.timestamp + GUARD_WARMUP);
         vm.roll(block.number + 1);
-        (uint256 refOut, uint256 spotOut) = guard.quote(other, address(0), 1 ether);
-        assertApproxEqRel(refOut, 2_000e18, 0.01e18, "1 ETH ~ 2000 USD");
+        (uint256 refOut, uint256 spotOut) = guard.quote(other, ETH, 1 ether);
+        assertApproxEqRel(refOut, 2_000e18, 0.01e18, "1 ETH ~ 2000 tokens");
         assertEq(refOut, spotOut);
 
         vm.expectRevert(PlacePriceGuard.InvalidConfig.selector);
@@ -468,50 +804,44 @@ contract NftCollectionTest is LaunchFixture {
 
     // ───────────────────────────── buyback ─────────────────────────────
 
-    function test_buyback_anyoneBuysAndBurns() public {
-        _mint(ALICE, 5); // buyback pending 0.0008 ETH
-        uint256 pending = c.buybackPending();
-        assertEq(pending, 0.0008 ether);
-        uint256 deadBefore = IERC20(token).balanceOf(DEAD);
+    /// @notice A sandwich around a waiting buyback reverts it; once the price is back anyone runs it in slices.
+    function test_buyback_publicSlicesAndSandwichReverts() public {
+        _next();
+        _swap(ATTACKER, key, token, true, 0.05 ether);
+        _mint(ALICE, 5); // burn share 0.0008 ETH waits
+        assertEq(c.buybackPending(), 0.0008 ether);
+        vm.expectPartialRevert(PlacePriceGuard.PriceDeviation.selector);
+        c.buyback(type(uint256).max);
+
+        _swap(ATTACKER, key, token, false, IERC20(token).balanceOf(ATTACKER));
+        _next();
         vm.prank(BOB);
-        uint256 burned = c.buyback(type(uint256).max);
+        uint256 burned = c.buyback(0.0003 ether);
         assertGt(burned, 0);
-        assertEq(IERC20(token).balanceOf(DEAD) - deadBefore, burned);
-        assertEq(c.totalBurned(token), burned);
-        assertEq(c.buybackPending(), 0);
+        assertEq(c.buybackPending(), 0.0005 ether);
+        assertEq(c.totalBurned(), burned);
+        c.buyback(type(uint256).max);
         vm.expectRevert(PlaceNftCollection.NothingToDo.selector);
         c.buyback(1);
         _assertSolvent();
     }
 
-    function test_buyback_sandwichReverts() public {
-        _mint(ALICE, 5);
-        _swap(ATTACKER, key, token, true, 0.05 ether); // front-run pump
-        vm.expectPartialRevert(PlacePriceGuard.PriceDeviation.selector);
-        c.buyback(type(uint256).max);
-        assertEq(c.buybackPending(), 0.0008 ether, "nothing spent");
-    }
-
-    /// @notice A front-run inside the guard's deviation band costs the buyback at most deviation + impact.
+    /// @notice A front-run inside the guard's band costs the in-mint buyback at most deviation + impact.
     function test_buyback_smallSandwichLossBounded() public {
-        _mint(ALICE, 5);
-        (uint256 refOut,) = guard.quote(route, address(0), 0.0008 ether);
+        (uint256 refOut,) = guard.quote(route, ETH, 0.0008 ether);
         _swap(ATTACKER, key, token, true, 0.0002 ether); // small pump, inside the 3% band
-        uint256 burned = c.buyback(type(uint256).max);
-        assertGe(burned, refOut * (10_000 - GUARD_DEVIATION - MAX_IMPACT) / 10_000);
-    }
-
-    function test_buyback_partialAmounts() public {
-        _mint(ALICE, 5);
-        c.buyback(0.0003 ether);
-        assertEq(c.buybackPending(), 0.0005 ether);
-        _assertSolvent();
+        _mint(ALICE, 5); // burn 0.0008 ETH in the mint
+        assertEq(c.buybackPending(), 0);
+        assertGe(c.totalBurned(), refOut * (10_000 - GUARD_DEVIATION - MAX_IMPACT) / 10_000);
     }
 
     // ───────────────────────────── fuzz ─────────────────────────────
 
-    /// @notice Every split adds up to the payment and the contract stays solvent after any mints and claims.
-    function testFuzz_splitConservesAndSolvent(uint16 creatorBps, uint16 holdersBps, uint8 a, uint8 b) public {
+    /// @notice Any economy and reward token, mints in ETH and the pair token, a transfer and claims: every split
+    ///         is fully owed and the contract stays solvent in every asset.
+    function testFuzz_economyConservesAndSolvent(uint16 creatorBps, uint16 holdersBps, uint8 a, uint8 b, uint8 rt)
+        public
+    {
         creatorBps = uint16(bound(creatorBps, 0, 10_000));
         holdersBps = uint16(bound(holdersBps, 0, 10_000 - creatorBps));
         uint256 qa = bound(a, 1, 5);
@@ -520,20 +850,28 @@ contract NftCollectionTest is LaunchFixture {
         p.economy = PlaceNftCollection.Economy({
             creatorBps: creatorBps, holdersBps: holdersBps, burnBps: 10_000 - creatorBps - holdersBps
         });
+        uint256 r = rt % 3;
+        p.rewardToken = r == 0 ? ETH : r == 1 ? token : address(usd);
         c = _create(CREATOR, p);
         _mint(ALICE, qa);
         _mint(BOB, qb);
-        uint256 total = PRICE * (qa + qb);
-        assertEq(address(c).balance, total);
-        assertEq(c.reserved(address(0)), total, "everything is owed to someone");
-        uint256[] memory ids = new uint256[](qa);
-        for (uint256 i = 0; i < qa; i++) {
-            ids[i] = i + 1;
+        _mintToken(ALICE, 1);
+        vm.prank(ALICE);
+        c.transferFrom(ALICE, CAROL, 1);
+        _mint(BOB, 1);
+        _assertSolvent();
+        _days(31);
+        uint256[] memory ids = new uint256[](qa - 1);
+        for (uint256 i = 0; i < qa - 1; i++) {
+            ids[i] = i + 2;
         }
         vm.prank(ALICE);
         c.claim(ids);
-        c.payPlatform(address(0));
-        if (c.creatorOwed(address(0)) != 0) c.payCreator(address(0));
+        vm.prank(CAROL);
+        c.claim(_ids(1));
+        c.payOut(ETH);
+        if (c.creatorOwed(token) + c.platformOwed(token) != 0) c.payOut(token);
         _assertSolvent();
+        assertEq(c.buybackPending(), 0, "no manipulation: every burn ran");
     }
 }

@@ -29,8 +29,8 @@ interface ICommunityHookWiring {
 ///         - `fundCampaign`: a daily holders or traders stream in the PlaceRewardsDistributor for this token, funded
 ///           for N epochs;
 ///         - `fundStaking`: a PlaceStaking program for stakers of this token;
-///         - `fundNftCampaign`: a daily NFT holders stream for an official, paid PlaceNftCollection of this token
-///           (at most `MAX_NFT_CAMPAIGN_BPS` of the fund's balance, once per `NFT_CAMPAIGN_COOLDOWN`);
+///         - `fundNftCampaign`: a daily NFT holders stream for an official, paid PlaceNftCollection paired with
+///           this token (at most `MAX_NFT_CAMPAIGN_BPS` of the fund's balance, once per `NFT_CAMPAIGN_COOLDOWN`);
 ///         - `buybackAndBurn`: buys this token with the fund and sends it to 0x…dEaD, within the registry's
 ///           per-hop price impact cap and the PlacePriceGuard reference price.
 ///         The reward can be any token of the PlaceRewardTokenRegistry white list (or this token through its own
@@ -233,10 +233,10 @@ contract PlaceCommunityVault is Initializable, ReentrancyGuard, PlaceRouteSwappe
     }
 
     /// @notice A daily NFT holders stream for `r.collection` from the fund. The collection must be made by the Place
-    ///         NFT factory for this token, be official (made by the token's creator), have a non-zero mint price
-    ///         (with a free mint the creator could mint the whole collection to own wallets at no cost) and at
-    ///         least one NFT. Limits: `MAX_NFT_CAMPAIGN_BPS` of the fund in `fundAsset`, one campaign per
-    ///         `NFT_CAMPAIGN_COOLDOWN`.
+    ///         NFT factory with this token as its pair token, be official (made by the token's creator), have a
+    ///         non-zero mint price (with a free mint the creator could mint the whole collection to own wallets at
+    ///         no cost) and at least one NFT. Limits: `MAX_NFT_CAMPAIGN_BPS` of the fund in `fundAsset`, one
+    ///         campaign per `NFT_CAMPAIGN_COOLDOWN`.
     function fundNftCampaign(NftCampaignRequest calldata r) external nonReentrant returns (bytes32 streamId) {
         _requireCreator();
         IPlaceNftCollection c = IPlaceNftCollection(r.collection);
